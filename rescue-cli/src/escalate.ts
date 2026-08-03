@@ -43,7 +43,23 @@ export interface BuildLadderParams {
   multipliers?: readonly bigint[];
 }
 
-export const DEFAULT_MULTIPLIERS = [5n, 10n, 20n, 40n] as const;
+/**
+ * Ladder rungs, ascending.
+ *
+ * IMPORTANT — start HIGH in a contested race. Leaders order by descending total gas price, so
+ * once both our transaction and the attacker's are in the same leader's mempool, the block
+ * position is decided by fee alone. Arriving 5ms earlier with a lower bid loses. Latency only
+ * determines whether we make the cut for that proposal at all; the fee decides who goes first
+ * inside it.
+ *
+ * The old default started at 5x and climbed, which is correct for a cost-sensitive
+ * uncontested send and exactly wrong for a rescue. Losing costs the whole position; overpaying
+ * costs a few MON.
+ */
+export const DEFAULT_MULTIPLIERS = [20n, 40n, 80n, 160n] as const;
+
+/** For an uncontested send where cost matters more than winning. */
+export const ECONOMY_MULTIPLIERS = [2n, 5n, 10n] as const;
 
 export async function buildLadder(p: BuildLadderParams): Promise<LadderStep[]> {
   const multipliers = [...(p.multipliers ?? DEFAULT_MULTIPLIERS)].sort((a, b) => (a < b ? -1 : 1));
@@ -86,9 +102,12 @@ export interface FireParams {
 }
 
 /**
- * Fire the ladder: broadcast the cheapest rung everywhere, and escalate only if it has not
- * landed within `rungTimeoutMs`. Starting at the bottom avoids overpaying in the common case
- * where nobody is contesting, while still reaching a high bid quickly when someone is.
+ * Fire the ladder: broadcast the lowest rung everywhere, and escalate only if it has not landed
+ * within `rungTimeoutMs`.
+ *
+ * With DEFAULT_MULTIPLIERS the "lowest" rung is already 20x, because in a contested race the
+ * fee is what decides block position and being outbid loses the position outright. The ladder
+ * exists to go higher still if even that is not enough, not to creep up from cheap.
  */
 export async function fireLadder(p: FireParams): Promise<FireResult> {
   const timeline: FireResult['timeline'] = [];

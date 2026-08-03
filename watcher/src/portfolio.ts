@@ -32,14 +32,31 @@ export interface Portfolio {
 }
 
 /** How many withdrawId slots to scan per validator. The protocol allows 0-255. */
-const WITHDRAW_SLOTS_TO_SCAN = 8;
+const WITHDRAW_SLOTS_TO_SCAN = 16;
 
+/**
+ * Load a delegator's positions.
+ *
+ * `extraValidatorIds` exists because `getDelegations()` is NOT a complete source of truth for
+ * outstanding withdrawals. Once a delegator's next-epoch stake reaches zero the precompile
+ * removes them from the delegator linked list, even though their pending withdrawal requests
+ * still exist and are still claimable. A user who unbonded their entire position — exactly the
+ * case this project cares about — therefore disappears from `getDelegations` while still
+ * having funds to rescue.
+ *
+ * So: use getDelegations for discovery, and always also scan any validator id we already know
+ * about from elsewhere (a stored watch, a prior Undelegate event).
+ */
 export async function loadPortfolio(
   client: PublicClient,
   address: `0x${string}`,
+  extraValidatorIds: readonly bigint[] = [],
 ): Promise<Portfolio> {
   const epoch = await getEpoch(client);
-  const validatorIds = await getDelegations(client, address);
+  const discovered = await getDelegations(client, address);
+  const validatorIds = [...new Set([...discovered, ...extraValidatorIds])].sort((a, b) =>
+    a < b ? -1 : a > b ? 1 : 0,
+  );
 
   const positions: Position[] = [];
   for (const validatorId of validatorIds) {
@@ -48,6 +65,10 @@ export async function loadPortfolio(
       getValidator(client, validatorId),
     ]);
 
+    // getWithdrawalRequest is the safe probe: an empty slot reads back as (0,0,0) rather than
+    // reverting. withdraw() would revert with "unknown withdrawal id" and, because an invalid
+    // staking call consumes all gas in its frame, that is an expensive way to discover a slot
+    // is empty.
     const pending: Position['pendingWithdrawals'] = [];
     for (let slot = 0; slot < WITHDRAW_SLOTS_TO_SCAN; slot++) {
       const req = await getWithdrawalRequest(client, validatorId, address, slot);

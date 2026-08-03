@@ -519,7 +519,99 @@ they are most expensive.
 
 ---
 
-## Q10 — The `withdrawId` griefing vector, re-examined
+## Q11 — Precompile edge cases that the documentation gets wrong
+
+Reading the upstream implementation alongside the docs surfaced several places where the
+documentation is incomplete or actively wrong. Each of these was a live or latent bug here.
+
+### `withdrawEpoch` is NOT the maturity epoch — this was an off-by-one bug
+
+The `WithdrawalRequest` struct comment says *"Epoch when undelegate stake deactivates"*, but the
+`undelegate` pseudocode on the same page stores `epoch = getEpoch()` — the current epoch. These
+cannot both be true. The struct comment is correct: the stored value is `n+1` (or `n+2` past the
+boundary block), i.e. the **activation** epoch.
+
+Maturity is therefore **`withdrawEpoch + WITHDRAWAL_DELAY`**, not `withdrawEpoch`.
+
+`isClaimable()` originally compared against `withdrawEpoch` directly, which would have fired
+every rescue one full epoch early. The call reverts with `"withdrawal not ready"` — and since an
+invalid staking-precompile call **consumes all gas in its frame**, and Monad charges the gas
+limit rather than gas used, the mistake is expensive as well as useless. Fixed in
+`packages/shared/src/epoch.ts`.
+
+### `getDelegations()` is not a complete source of truth
+
+Once a delegator's next-epoch stake reaches zero, the precompile removes them from the delegator
+linked list — **while their pending withdrawal requests still exist and remain claimable**. A
+user who unbonded their entire position, which is precisely the case this project targets,
+vanishes from `getDelegations()` while still having funds to rescue.
+
+Withdrawals must therefore be enumerated by probing `getWithdrawalRequest` per slot, with
+validator ids carried from a stored watch or a prior `Undelegate` event rather than rediscovered.
+`loadPortfolio()` now takes explicit extra validator ids for this reason.
+
+### Probe with `getWithdrawalRequest`, never with `withdraw`
+
+`getWithdrawalRequest` on an empty slot returns `(0, 0, 0)` and does **not** revert, so it is
+safe to scan with. A live request always carries a non-zero epoch, so `withdrawEpoch == 0` means
+"empty".
+
+`withdraw()` on an empty slot reverts with `"unknown withdrawal id"`, and burns the whole call
+frame's gas doing so. A naive rescue loop over all 256 ids would be ruinous.
+
+### The withdrawal can pay out MORE than it says
+
+Two mechanisms, neither obvious:
+
+- **Dust sweep.** If an `undelegate` would leave less than `DUST_THRESHOLD` (1 gwei) of stake
+  behind, the precompile silently increases the withdrawal to the delegator's *entire remaining
+  stake*. The realised amount can exceed the amount requested.
+- **Accrued rewards.** `withdraw()` pays `request.amount + rewards accrued to the request`, since
+  each withdrawal request behaves like an independent delegator until it matures.
+
+So never assert equality against `getWithdrawalRequest.amount`; read the `Undelegate` event or
+the balance delta.
+
+### `undelegate` has no minimum amount, but `claimRewards` never fails
+
+`DUST_THRESHOLD` applies only to `delegate`. `undelegate` accepts any non-zero amount; a zero
+amount is a silent no-op returning `true`.
+
+`claimRewards` on a non-existent delegator or with zero rewards **succeeds and returns `true`,
+emitting no event** — contradicting the docs, which claim it reverts. A `true` return is not
+proof that MON moved; check the log or the balance.
+
+### Validator flags are a bitmask, and a dead validator still pays out
+
+`ValidatorFlagsOk = 0`, `StakeTooLow = 1`, `Withdrawn = 2`, `DoubleSign = 4` — combinations are
+valid, so test `flags & 1` rather than `flags == 1`. There is no jailing mechanism and no
+automated slashing.
+
+Most importantly: **nothing in `undelegate` or `withdraw` reads the validator's flags or checks
+valset membership.** Funds are recoverable from a fully dead or removed validator. Validator ids
+are permanent for exactly this reason.
+
+---
+
+## Q10 — The `withdrawId` griefing vector, resolved
+
+Earlier drafts listed this as an open, unmitigated attack. **It is not a vector at all**, and the
+reason is worth recording.
+
+Withdrawal slots are keyed `(namespace, validatorId, msg.sender, withdrawId)`, and `undelegate`
+binds the delegator to `msg.sender` unconditionally. **A third party cannot create, occupy, or
+touch another delegator's slots at any price.** Only the victim's own key can fill the victim's
+256 slots — and anyone holding that key can simply withdraw instead. Slot exhaustion is a
+self-inflicted condition, not something an outsider can inflict.
+
+What remains true is much narrower: an attacker *who already holds the key* can fill slots to
+block us from creating new withdrawal requests. But filling them with real stake hands us 256
+claimable requests our batch rescue can drain, and filling them with dust still leaves us the
+option of withdrawing the dust to free a slot. It is a delay, not a lockout, and it is loud.
+
+---
+
+## Q10a — The original framing (kept for the record)
 
 An earlier version listed this as an unmitigated attack and overstated it. Correcting.
 

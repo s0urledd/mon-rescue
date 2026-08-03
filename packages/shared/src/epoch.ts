@@ -34,20 +34,49 @@ export function withdrawableAtEpoch(state: EpochState): bigint {
 }
 
 /**
- * Whether a pending withdrawal request is claimable in the current epoch.
+ * The epoch at which a pending request actually becomes claimable.
+ *
+ * `withdrawEpoch`, as returned by getWithdrawalRequest(), is NOT the maturity epoch — it is
+ * the epoch at which the undelegated stake *deactivates*, i.e. `n+1` or `n+2` relative to the
+ * epoch the undelegate was submitted in. Maturity is one `WITHDRAWAL_DELAY` beyond that.
+ *
+ * The documentation is genuinely contradictory here: the WithdrawalRequest struct comment says
+ * "Epoch when undelegate stake deactivates" while the undelegate pseudocode stores
+ * `epoch = getEpoch()` (the current epoch). The struct comment is the correct one.
+ *
+ * Getting this wrong in either direction is costly. Treating `withdrawEpoch` as maturity fires
+ * an epoch early and the call reverts with "withdrawal not ready" — and because an invalid
+ * staking-precompile call consumes ALL gas in its frame, and Monad charges the gas limit
+ * rather than gas used, that mistake is expensive as well as useless.
+ */
+export function maturityEpoch(withdrawEpoch: bigint): bigint {
+  return withdrawEpoch + STAKING_CONSTANTS.WITHDRAWAL_DELAY;
+}
+
+/**
+ * Whether a pending withdrawal request is claimable now.
  * `withdrawEpoch` comes from getWithdrawalRequest().
  */
 export function isClaimable(current: EpochState, withdrawEpoch: bigint): boolean {
-  return current.epoch >= withdrawEpoch;
+  return current.epoch >= maturityEpoch(withdrawEpoch);
 }
 
 /**
  * Epochs remaining before a request becomes claimable. Zero means claimable now.
- * Deliberately returns epochs rather than seconds: an epoch is ~5.5 hours but is
- * round-driven, so any conversion to wall-clock time is an estimate, not a
- * deadline to schedule against.
+ * Deliberately returns epochs rather than seconds: an epoch is round-driven, so any conversion
+ * to wall-clock time is an estimate, never a deadline to schedule against.
  */
 export function epochsUntilClaimable(current: EpochState, withdrawEpoch: bigint): bigint {
-  const remaining = withdrawEpoch - current.epoch;
+  const remaining = maturityEpoch(withdrawEpoch) - current.epoch;
   return remaining > 0n ? remaining : 0n;
+}
+
+/**
+ * An empty withdrawal slot reads back as (0, 0, 0). A live request always carries a non-zero
+ * epoch, because the stored value is at least `currentEpoch + 1`. So a zero `withdrawEpoch`
+ * means "no request here", and getWithdrawalRequest is safe to probe with — unlike withdraw(),
+ * which reverts with "unknown withdrawal id" on an empty slot.
+ */
+export function isEmptySlot(withdrawalAmount: bigint, withdrawEpoch: bigint): boolean {
+  return withdrawalAmount === 0n && withdrawEpoch === 0n;
 }
