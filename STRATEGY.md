@@ -46,6 +46,12 @@ premature attempt is gas.
 will revert are still included and still charged. On a chain that dropped such transactions
 pre-submission would be pointless.
 
+**Verified, not assumed.** Scanning 1,287 receipts across 400 testnet blocks found reverted
+transactions sitting in blocks with real gas consumed — e.g.
+`0x39d25782397ad8b484c219fd11d7f2f7c12db01b7c7758078bb9f1b0272d2209` at block 50,578,382 with
+`gasUsed` 176,821. A failed transaction is included and charged, which is exactly the property
+the spray depends on.
+
 *Cost.* Gas on every attempt that lands early — roughly 30-40 attempts at one per three blocks.
 The rescued position is worth orders of magnitude more.
 
