@@ -1,0 +1,22 @@
+{
+  "name": "@monrescue/research",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "Phase 0 research harness: empirical answers to Q1-Q6 against Monad testnet.",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "verify": "node --experimental-strip-types src/verify-network.ts",
+    "script:a": "node --experimental-strip-types src/script-a-7702.ts",
+    "script:b": "node --experimental-strip-types src/script-b-atomic.ts",
+    "script:c": "node --experimental-strip-types src/script-c-reserve.ts",
+    "script:d": "node --experimental-strip-types src/script-d-guardian.ts"
+  },
+  "dependencies": {
+    "@monrescue/shared": "workspace:*",
+    "viem": "^2.21.0"
+  },
+  "devDependencies": { "typescript": "^5.6.0", "@types/node": "^22.0.0" }
+}

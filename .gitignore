@@ -1,0 +1,9 @@
+node_modules/
+dist/
+out/
+cache/
+*.log
+.env
+.env.*
+!.env.example
+research/artifacts/*.json

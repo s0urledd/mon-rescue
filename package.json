@@ -1,0 +1,14 @@
+{
+  "name": "monrescue",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Delegator-protection layer for Monad: staking alert engine and a destination-locked rescue path for compromised delegators.",
+  "license": "MIT",
+  "type": "module",
+  "workspaces": ["packages/*", "research", "watcher", "rescue-cli"],
+  "scripts": {
+    "build": "pnpm -r --filter './packages/*' build && pnpm -r build",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "packageManager": "pnpm@10.33.0"
+}

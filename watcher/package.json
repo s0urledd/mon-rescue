@@ -1,0 +1,19 @@
+{
+  "name": "@monrescue/watcher",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "Monad delegator alert engine and public Telegram bot.",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/index.js",
+    "dev": "node --experimental-strip-types src/index.ts"
+  },
+  "dependencies": {
+    "@monrescue/shared": "workspace:*",
+    "viem": "^2.21.0"
+  },
+  "devDependencies": { "typescript": "^5.6.0", "@types/node": "^22.0.0" }
+}
