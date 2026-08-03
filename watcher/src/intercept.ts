@@ -1,6 +1,11 @@
-import { decodeEventLog, toEventSelector, getAddress, parseAbiItem } from 'viem';
+import { toEventSelector } from 'viem';
 import type { PublicClient, Log } from 'viem';
-import { STAKING_PRECOMPILE, STAKING_ABI, maturityEpoch, boundaryBlockFor, earliestStartBlockFor, latestStartBlockFor } from '@monrescue/shared';
+import {
+  boundaryBlockFor, earliestStartBlockFor, latestStartBlockFor,
+  scanUnstakes, type UnstakeEvent,
+} from '@monrescue/shared';
+
+export { scanUnstakes, type UnstakeEvent };
 
 /**
  * Attacker-unstake interception — the central loop.
@@ -25,98 +30,9 @@ import { STAKING_PRECOMPILE, STAKING_ABI, maturityEpoch, boundaryBlockFor, earli
  * destination-locked delegation takes it from there.
  */
 
-export const UNDELEGATE_EVENT = parseAbiItem(
-  'event Undelegate(uint64 indexed validatorId, address indexed delegator, uint8 withdrawId, uint256 amount, uint64 activationEpoch)',
-);
-
-export const UNDELEGATE_TOPIC = toEventSelector(
-  'event Undelegate(uint64 indexed validatorId, address indexed delegator, uint8 withdrawId, uint256 amount, uint64 activationEpoch)',
-);
-
 export const WITHDRAW_TOPIC = toEventSelector(
   'event Withdraw(uint64 indexed validatorId, address indexed delegator, uint8 withdrawId, uint256 amount, uint64 withdrawEpoch)',
 );
-
-/** Public endpoints cap eth_getLogs at 100 blocks, so any scan must page. */
-export const MAX_LOG_RANGE = 100n;
-
-export interface UnstakeEvent {
-  validatorId: bigint;
-  delegator: `0x${string}`;
-  withdrawId: number;
-  amount: bigint;
-  /** Epoch the stake deactivates — NOT the maturity epoch. */
-  activationEpoch: bigint;
-  /** Epoch at which withdraw() will succeed: activationEpoch + WITHDRAWAL_DELAY. */
-  maturesAtEpoch: bigint;
-  blockNumber: bigint;
-  txHash: `0x${string}`;
-}
-
-function decodeUnstake(log: Log): UnstakeEvent | undefined {
-  try {
-    const decoded = decodeEventLog({
-      abi: STAKING_ABI,
-      data: log.data,
-      topics: log.topics as [`0x${string}`, ...`0x${string}`[]],
-      eventName: 'Undelegate',
-    });
-    const a = decoded.args as unknown as {
-      validatorId: bigint; delegator: `0x${string}`; withdrawId: number;
-      amount: bigint; activationEpoch: bigint;
-    };
-    return {
-      validatorId: a.validatorId,
-      delegator: getAddress(a.delegator),
-      withdrawId: Number(a.withdrawId),
-      amount: a.amount,
-      activationEpoch: a.activationEpoch,
-      maturesAtEpoch: maturityEpoch(a.activationEpoch),
-      blockNumber: log.blockNumber ?? 0n,
-      txHash: (log.transactionHash ?? '0x') as `0x${string}`,
-    };
-  } catch {
-    return undefined;
-  }
-}
-
-/** Topic filter for one watched address. `delegator` is indexed, so this is cheap. */
-export function unstakeFilterTopics(delegator: `0x${string}`) {
-  return [
-    UNDELEGATE_TOPIC,
-    null,
-    `0x${delegator.slice(2).toLowerCase().padStart(64, '0')}` as `0x${string}`,
-  ] as const;
-}
-
-/**
- * Scan a block range for unstakes by a watched address, paging around the 100-block cap.
- */
-export async function scanUnstakes(
-  client: PublicClient,
-  delegator: `0x${string}`,
-  fromBlock: bigint,
-  toBlock: bigint,
-): Promise<UnstakeEvent[]> {
-  const out: UnstakeEvent[] = [];
-  for (let start = fromBlock; start <= toBlock; start += MAX_LOG_RANGE) {
-    const end = start + MAX_LOG_RANGE - 1n > toBlock ? toBlock : start + MAX_LOG_RANGE - 1n;
-    // Filter server-side on the indexed `delegator` topic — the node does the work, and we
-    // never pull the whole precompile's log volume across the wire.
-    const logs = await client.getLogs({
-      address: STAKING_PRECOMPILE,
-      event: UNDELEGATE_EVENT,
-      args: { delegator },
-      fromBlock: start,
-      toBlock: end,
-    });
-    for (const log of logs) {
-      const ev = decodeUnstake(log as Log);
-      if (ev) out.push(ev);
-    }
-  }
-  return out;
-}
 
 export interface ArmingPlan {
   delegator: `0x${string}`;

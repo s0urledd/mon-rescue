@@ -6,6 +6,7 @@ import {
   chainById, RPC_POOL, getEpoch, getWithdrawalRequest, planSweep, assertSweepAllowed,
   isClaimable, maturityEpoch, isEmptySlot, advise, boundaryBlockFor,
   earliestStartBlockFor, latestStartBlockFor, localFirstClient, transportConfigFromEnv,
+  discoverUnstakes, validatorIdsFrom,
 } from '@monrescue/shared';
 import { MONRESCUE_ABI } from './abi.js';
 import { broadcastEverywhere } from './broadcast.js';
@@ -97,9 +98,32 @@ async function main() {
   console.log(`safe      ${safeAddress}`);
 
   // --- positions ----------------------------------------------------------
-  // Explicit ids are accepted because getDelegations drops a delegator once next-epoch stake
-  // hits zero, while their withdrawals stay live — the fully-unbonded case is invisible to it.
-  const validatorIds = requireEnv('VALIDATOR_IDS').split(',').map((s) => BigInt(s.trim()));
+  // Default to discovering everything from the Undelegate events themselves. The unstake
+  // transaction — usually the attacker's — already carries the validator, the slot, the amount
+  // and the maturity epoch, so there is nothing for an operator to type under time pressure,
+  // and nothing to get wrong. VALIDATOR_IDS stays as an override for when the event is older
+  // than the log lookback or the RPC will not serve the range.
+  let validatorIds: bigint[];
+  if (process.env.VALIDATOR_IDS) {
+    validatorIds = process.env.VALIDATOR_IDS.split(',').map((s) => BigInt(s.trim()));
+    console.log(`\nvalidators (from VALIDATOR_IDS): ${validatorIds.join(', ')}`);
+  } else {
+    console.log(`\ndiscovering positions from Undelegate events...`);
+    const events = await discoverUnstakes(client, victim);
+    validatorIds = validatorIdsFrom(events);
+    for (const e of events) {
+      console.log(
+        `  ${e.txHash.slice(0, 12)}… block ${e.blockNumber}: validator ${e.validatorId} ` +
+          `slot ${e.withdrawId}, ${formatEther(e.amount)} MON, matures epoch ${e.maturesAtEpoch}`,
+      );
+    }
+    if (validatorIds.length === 0) {
+      throw new Error(
+        'no Undelegate events found for this account in the lookback window. ' +
+          'Pass VALIDATOR_IDS=<ids> to probe slots directly.',
+      );
+    }
+  }
   const positions: { validatorId: bigint; withdrawId: number; amount: bigint; maturesAt: bigint }[] = [];
   for (const validatorId of validatorIds) {
     for (let slot = 0; slot < SLOTS_TO_PROBE; slot++) {
