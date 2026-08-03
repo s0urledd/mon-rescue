@@ -3,6 +3,7 @@ import { TelegramBot } from './telegram.js';
 import {
   newWatchState, evaluateValidator, evaluateDelegatorEvent, type Alert,
 } from './alerts.js';
+import { watchForUnstakes, describeUnstake } from './intercept.js';
 
 /**
  * MonRescue watcher — alert engine and public Telegram bot.
@@ -14,6 +15,8 @@ import {
 
 const CHAIN_ID = Number(process.env.CHAIN_ID ?? 143);
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? 60_000);
+/** Unstake scanning is the critical path, so it runs far tighter than validator health. */
+const UNSTAKE_SCAN_INTERVAL_MS = Number(process.env.UNSTAKE_SCAN_INTERVAL_MS ?? 3_000);
 
 /**
  * eth_getLogs is capped at a 100-block range on the public endpoints, so any backfill must
@@ -70,8 +73,51 @@ async function main() {
   await tick();
   const timer = setInterval(() => void tick().catch((e) => console.error(e)), POLL_INTERVAL_MS);
 
+  // Unstake interception — the highest-value signal we produce.
+  //
+  // The attacker holds the seed and unstakes the position themselves; they cannot take it for
+  // WITHDRAWAL_DELAY, and their own Undelegate event hands us the validator, the slot, the
+  // amount and the exact maturity epoch. So the moment the theft starts is the moment our clock
+  // starts, with every parameter already known.
+  //
+  // Watched addresses come from bot subscriptions, so this list grows as users opt in.
+  let stopIntercept = () => {};
+  const rearmIntercept = () => {
+    stopIntercept();
+    const delegators = [...new Set([...subscriptions.values()].flatMap((s) => [...s]))].map(
+      (a) => a as `0x${string}`,
+    );
+    if (delegators.length === 0) return;
+    stopIntercept = watchForUnstakes({
+      client,
+      delegators,
+      intervalMs: UNSTAKE_SCAN_INTERVAL_MS,
+      onUnstake: async (event, plans) => {
+        console.log(`[critical] unstake ${event.delegator} val=${event.validatorId} slot=${event.withdrawId}`);
+        const plan = plans[0];
+        const detail = plan
+          ? `\n\nRescue window: flip blocks ${plan.flipWindowStart}..${plan.flipWindowEnd} ` +
+            `(boundary ${plan.boundaryBlock}).`
+          : '';
+        await emit([{
+          kind: 'unexpected_undelegate',
+          severity: 'critical',
+          subject: event.delegator.toLowerCase(),
+          validatorId: event.validatorId,
+          message: describeUnstake(event) + detail,
+          firedAt: Date.now(),
+        }]);
+      },
+    });
+  };
+  rearmIntercept();
+  // Subscriptions change as users /watch, so re-derive the address list periodically.
+  const interceptTimer = setInterval(rearmIntercept, 60_000);
+
   const shutdown = () => {
     clearInterval(timer);
+    clearInterval(interceptTimer);
+    stopIntercept();
     bot?.stop();
     console.log('watcher stopped');
     process.exit(0);
