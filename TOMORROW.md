@@ -5,6 +5,63 @@ everything after them waits on an epoch boundary.
 
 ---
 
+## PRIORITY: the boundary A/B experiment
+
+Two undelegates of the same size, in the **same epoch**, on different slots — one before the
+boundary block, one after. This settles in a single run what the documentation contradicts
+itself on.
+
+```bash
+CHAIN_ID=10143 VALIDATOR_ID=<id> AMOUNT=<n> PHASE=ab SLOT_A=0 SLOT_B=1 \
+  pnpm --filter @monrescue/research boundary
+```
+
+`PHASE=ab` fires leg A now, then **polls and fires leg B automatically** once the boundary
+passes. Do not try to hit leg B by hand: its window is only `EPOCH_DELAY_ROUNDS` wide —
+measured at 4,962–4,999 blocks, about **25 minutes**. Missing it costs a day, because each leg
+then needs its own unbonding period.
+
+**Predictions under test** (from the implementation, not the docs), with the experiment run in
+epoch `n`:
+
+| leg | fired | predicted `withdrawEpoch` | predicted claimable |
+|---|---|---|---|
+| A | before the boundary block | `n+1` | `n+2` |
+| B | after the boundary block | `n+2` | `n+3` |
+
+If both instead record `n`, then the docs' `undelegate` pseudocode (`epoch = getEpoch()`) is
+right and our `maturityEpoch()` is wrong — which would mean we fire an epoch **late**, not
+early. Either way the on-chain value wins and `FINDINGS.md` Q11 gets updated.
+
+Read it back any time with `PHASE=report`.
+
+### Two things that will bite
+
+**Freshly staked MON cannot be undelegated yet.** Only *activated* stake can be removed —
+"pending delegations cannot be removed until they are active". A delegation made during epoch
+`n` activates at `n+1` (or `n+2` past the boundary). The stake made today activates at epoch
+**1013**, so nothing can be undelegated before that epoch begins. The script checks active stake
+and refuses rather than reverting on-chain.
+
+**Both legs need to be in the same epoch, and you need enough active stake for two.** Per epoch
+the shape is: ~3.77h of "before boundary" (leg A can go anywhere in it), then a ~25 min delay
+period (leg B). Run `PHASE=ab` early in an epoch and it handles the wait itself.
+
+Concrete windows, from a live reading at epoch 1012 / block 50,587,531:
+
+```
+epoch 1013 begins ~block 50,604,900
+  leg A window: 50,604,900 .. 50,649,999   (~3.77h)
+  leg B window: 50,650,000 .. ~50,655,000  (~25 min)
+epoch 1014 begins ~block 50,654,900
+  leg A window: 50,654,900 .. 50,699,999
+  leg B window: 50,700,000 .. ~50,705,000
+```
+
+Re-derive these on the day — the script does it live, so just run it and read the header.
+
+---
+
 ## The scheduling constraint (read first)
 
 Unbonding takes **2–3 epochs, ~8–13 hours**. So the undelegate has to land early in the day or

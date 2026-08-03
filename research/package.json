@@ -17,7 +17,8 @@
     "deploy": "tsx src/deploy.ts",
     "stake": "tsx src/setup-stake.ts",
     "make-window": "tsx src/make-window.ts",
-    "adversary": "tsx src/adversary.ts"
+    "adversary": "tsx src/adversary.ts",
+    "boundary": "tsx src/boundary-experiment.ts"
   },
   "dependencies": {
     "@monrescue/shared": "workspace:*",
