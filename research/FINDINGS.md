@@ -133,7 +133,27 @@ executed):
 | 100 MON | 1000 MON | 10 | **1090 MON** | 10 MON |
 | 3 MON | 0 | 3 | 0 | 3 MON |
 
-### Design consequence — this is good news
+### UNRESOLVED: the documentation contradicts itself, and it matters
+
+Two statements in the docs cannot both be true for a delegated EOA:
+
+- **Permissive reading** (reserve-balance page): "For a non-sender account, the ending balance
+  must not be lower than `min(balance at transaction start, user_reserve_balance)`." With a
+  start of 0, the floor is 0 — a full sweep is legal.
+- **Strict reading** (EIP-7702 page): "transactions that would reduce its balance to below
+  10 MON will **unconditionally** revert", where "dips below" means "decrements **and** drops
+  below". Sweeping 1000 MON to 0 both decrements and ends below 10 — so it would revert.
+
+The difference is the whole outcome: **sweep everything, or always strand 10 MON.**
+`packages/shared/src/reserve.ts` implements the permissive reading, and **that choice is not
+yet validated.** Script C exists specifically to settle it, and until it runs this is
+**UNVERIFIED**. If the strict reading wins, `reserveFloor()` becomes a flat 10 MON and the
+de-delegation branch stops being an edge case and becomes the normal path for a full recovery.
+
+Do not quote the truth table above as fact until `research/artifacts/q3-reserve-balance.json`
+exists.
+
+### Design consequence, if the permissive reading holds
 
 A compromised wallet whose liquid MON has already been drained starts at **~0**, so the floor
 is ~0 and **the entire withdrawn stake can be swept in one transaction**. The reserve rule
@@ -230,6 +250,42 @@ destination in immutable storage set at construction, and exposes no arbitrary-r
 This is the section that decides whether the product is honest. Scope: **unbonding/staked MON**,
 which is the defensible case. Liquid MON against a live seed holder is not cryptographically
 defensible and we should not claim it is.
+
+### What the attacker actually does — correcting an earlier over-weighting
+
+An earlier draft of this document treated attacker **re-delegation** as the main threat. On
+reflection that is wrong, and the correction matters.
+
+The attacker holds the seed. To take unbonding MON they need no EIP-7702 at all — they send
+two ordinary transactions from the EOA:
+
+1. `withdraw(validatorId, withdrawId)` — the precompile pays `msg.sender`, so funds land on
+   the EOA;
+2. a plain native transfer out.
+
+Re-delegation is only worth their trouble if they want **atomicity** — to close the gap
+between those two transactions. So there are two distinct adversaries:
+
+- **The ordinary attacker** uses two plain transactions and *leaves us a window between them*.
+  This is the common case and the one we are built to win.
+- **The sophisticated attacker** re-delegates to their own batch contract to close that window.
+  Only this one is defeated by the authorization window in Q8.
+
+Two consequences follow, and both were missed initially:
+
+**Our delegation is itself a brake on the attacker.** A delegated EOA cannot drop below the
+reserve floor, and delegated accounts cannot use the emptying exception. So while our
+delegation stands, the attacker's plain transfer cannot fully empty the account — to do that
+they must first undelegate and then wait `k=3` quiet blocks. That is both a delay and a loud
+on-chain signal. The delegation is not only our rescue path; it is a passive speed bump on
+theirs. (Subject to the Q3 ambiguity above.)
+
+**A failed withdrawal often means the money is right here.** If the attacker's `withdraw()`
+lands first, the funds are sitting on an EOA that is still delegated to a destination-locked
+contract. `rescue()` therefore does **not** abort when every withdrawal fails — it proceeds to
+sweep, because the most likely cause of that failure is precisely that the money has already
+arrived. An earlier version reverted in that case and would have thrown away the rescue at the
+exact moment it could succeed.
 
 ### Our real edge
 
@@ -356,6 +412,86 @@ Two further constraints that bite the hot path specifically:
 - **Included-but-reverted is a normal outcome.** Proposers cannot see current state, so a
   transaction that overspends is still included and still pays gas. The tooling must
   distinguish "not included" from "included and reverted" rather than treating both as failure.
+
+---
+
+## Q8 — Can the attacker permanently block us? (anti-blocking)
+
+The attacker holds the seed, so assume they will try to **lock us out**, not merely outrun us.
+Resolved against the EIP-7702 specification (Final).
+
+### The finding that changes the picture
+
+> "The authorization list is processed **before the execution portion of the transaction
+> begins**, but after the sender's nonce is incremented."
+
+A single type-`0x04` transaction therefore does, in order: apply our authorization, then run
+the top-level call. So the rescue transaction can **re-assert our delegation and execute the
+rescue atomically**. An attacker re-delegating the EOA to their own drainer is *not* a
+permanent lockout — it is something we undo inside our own transaction, in the same block.
+
+This is the single most important anti-blocking property available to us.
+
+### The nonce problem, and the window that solves it
+
+Authorizations are validated by **strict equality** against the authority's current nonce
+(step 6), and applying one **increments** that nonce (step 9). There is **no expiry field at
+all** — an authorization is valid indefinitely, and the only way to invalidate one is to spend
+its nonce. So:
+
+- One pre-signed authorization is valid only while the account sits at exactly that nonce.
+- Any transaction the attacker sends from the EOA invalidates it.
+
+**Countermeasure: pre-sign a window of authorizations at nonces `[n, n+16)` during onboarding.**
+At rescue time we submit every authorization at or above the current nonce, so bumping the
+nonce buys the attacker one transaction of delay, not a lockout. An authorization with a wrong
+nonce is *skipped*, not fatal — "immediately stop processing the tuple and continue to the next
+tuple" — it only costs ~25k gas.
+
+### The chaining hazard, and why the destination lock neutralises it
+
+The spec warns that consecutive authorizations **chain** inside one transaction: each success
+increments the nonce, making the next tuple match, and "the last valid occurrence" wins. For a
+general-purpose wallet that is a real hazard.
+
+**For MonRescue it is harmless, and that is a consequence of the destination lock.** Every
+authorization in the window names the same rescue contract, so whether one applies or all
+sixteen do, the account ends up delegated to the same destination-locked code. The outcome is
+identical.
+
+The same property bounds a key-store breach: these signatures let the holder delegate the
+user's account to a contract that can only pay **the user's own safe address**. A leaked
+authorization window is a nonce-griefing problem, not a fund-loss problem.
+
+### Attacker blocking moves, reassessed
+
+| Blocking move | Previously | With the authorization window |
+|---|---|---|
+| Re-delegate to their drainer | **Blocked us** | Undone inside our rescue transaction, before the call runs |
+| Clear the delegation | **Blocked us** | Same — we re-assert |
+| Bump the nonce to stale our authorization | **Blocked us** | Costs them one transaction; the window still covers us |
+| Exhaust the window (16+ transactions) | — | **Still wins.** Detected by `assessWindow()`, which asks the user to re-sign while they still can |
+| Occupy all 256 `withdrawId` slots | Open | **Still open.** Documented, unmitigated |
+| Outbid us on priority fee | Open | Pre-signed fee ladder, all rungs sharing one nonce so at most one lands |
+
+### Two implementation traps that fail *silently*
+
+1. **`executor: 'self'` changes the nonce viem signs.** When the authority is also the
+   transaction sender, the sender's nonce is incremented *before* the authorization list is
+   processed, so the authorization must be signed at `nonce + 1`. viem does this only when
+   `executor: 'self'` is set and `nonce` is not passed explicitly. Get it wrong and the
+   authorization is silently skipped: the transaction still succeeds, ~25k gas is burned, and
+   **no delegation is applied**. Our guardian-submitted rescue is the *relayer* case, so it
+   must NOT use `executor: 'self'`; scripts A–C are self-submitted and must.
+2. **A reverting call does not roll back the delegation.** "If transaction execution results in
+   failure … the processed delegation indicators is *not* rolled back." Never rely on a revert
+   to undo a re-delegation, and never assume a failed rescue left the account untouched.
+
+### Also rejected: `chainId = 0`
+
+An authorization signed with `chainId = 0` is valid on **every** chain and never expires. Since
+MonRescue runs on two live chains, `validateWindow()` refuses these outright. This is the same
+class of bug as the cross-chain replay Sherlock found in Harpie.
 
 ---
 

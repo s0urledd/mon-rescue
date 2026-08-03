@@ -46,7 +46,6 @@ contract MonRescue {
 
     error NotAuthorized();
     error LengthMismatch();
-    error AllWithdrawalsFailed();
     error SweepFailed();
     error NothingToSweep();
 
@@ -136,8 +135,16 @@ contract MonRescue {
             }
         }
 
-        if (succeeded == 0) revert AllWithdrawalsFailed();
-
+        // Deliberately NOT reverting when every withdrawal failed.
+        //
+        // The most likely reason for a failed withdrawal is that someone already called
+        // withdraw() on this slot — and the most likely someone is the attacker. Because the
+        // precompile always pays msg.sender, their withdrawal deposits the funds into THIS
+        // account, which is still delegated to this destination-locked contract. So a failed
+        // withdrawal frequently means the money is sitting here right now, waiting to be
+        // swept. Reverting would throw away the rescue at the exact moment it can succeed.
+        //
+        // _sweep reverts with NothingToSweep if there is genuinely nothing to move.
         _sweep(startingBalance, succeeded);
     }
 
