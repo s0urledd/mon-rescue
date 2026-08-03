@@ -412,6 +412,72 @@ ahead of the rescue tool (rare, high-stakes, hard to monetise).
 
 ---
 
+## Tier 2 — what actually defeats a live seed holder
+
+A survey of the smart-account recovery ecosystem (Safe, Candide, Ambire, Rhinestone, ZeroDev,
+Coinbase Smart Wallet, Biconomy Nexus, ERC-4337 reference) produced one finding that reframes
+the roadmap.
+
+### Almost every "recovery" product solves the wrong problem
+
+There are two distinct threat models and the industry conflates them:
+
+- **Lost key** — the owner can no longer sign. Recovery re-establishes a signer.
+- **Compromised key** — the attacker holds the key *right now* and is draining.
+
+**Safe's recovery module, Candide, ZeroDev Kernel recovery, Rhinestone's SocialRecovery, and
+Biconomy all solve only the lost-key case.** Their timelocks delay the *guardian's* action —
+protecting the owner from malicious guardians — not the *withdrawal*. Against a live attacker
+holding a threshold-1 owner key, the attacker drains in one transaction and can additionally
+call `cancelRecovery()` as the legitimate owner to block the recovery.
+
+**Coinbase Smart Wallet is worse than useless here**: its recovery key is simply another
+unilateral owner, so an attacker who obtains it can drain *and* remove the real user's passkey,
+locking them out permanently. This is an anti-pattern to avoid, not a model to copy.
+
+### The two designs that genuinely work
+
+1. **Rhinestone `ColdStorageHook`** (AGPL-3.0, audited by Ackee 2024-10-03) — the direct hit.
+   `VaultConfig { uint128 waitPeriod; address owner; }` where `owner` is the *only* permitted
+   transfer recipient, enforced by decoding the outgoing calldata. Because it is an ERC-7579
+   **type-4 hook**, it runs on every execution path, so a compromised root key cannot route
+   around it. Destination lock plus withdrawal timelock, already shipped.
+2. **Ambire's email/password account** — 2-of-2 for immediate execution; a single stolen key
+   can only transact after a **3-day timelock**, during which the other key cancels or evacuates.
+
+### The citable authority on why Tier 1 is bounded
+
+Rhinestone's own EIP-7702 documentation states it plainly: *"the EOA is always the root
+owner"*, *"No key rotation"*, *"if the EOA is compromised, the account cannot be recovered"*.
+No 7702 delegate in production today solves the compromised-seed case, because the seed can
+always sign a new type-`0x04` authorization. Our Tier 1 framing matches industry consensus
+exactly — we should ship it with that caveat stated, not softened.
+
+### Where MonRescue is actually novel
+
+No surveyed product combines all three of: **guardian-triggered** + **destination-locked** +
+**timelocked/epoch-gated withdrawal**. `ColdStorageHook` has the destination lock and the
+timelock but no guardian trigger; Ambire has commit-plus-timelock and a recovery-key trigger
+but no destination lock. On Monad the unbonding delay supplies the timelock *for free* — the
+protocol already forces the attacker to wait. That combination appears to be genuinely new.
+
+### Licensing caution
+
+Rhinestone's core-modules and all Ambire contracts are **AGPL-3.0**. MonRescue is MIT. Reading
+them for design is fine; copying their enforcement logic would make our contracts AGPL. If a
+permissively-licensed equivalent is needed, MetaMask's delegation-framework caveat enforcers
+(`AllowedCalldataEnforcer`, `ExactCalldataEnforcer`, Apache-2.0/MIT) implement the same
+destination-pinning primitive.
+
+### Roadmap consequence
+
+Tier 2 should be **`ColdStorageHook`-shaped, not social-recovery-shaped**, built as an
+ERC-7579 hook. That is a different product from Tier 1 and belongs behind it, not blended into
+it. Whether Monad has ERC-4337/7579 infrastructure deployed is an open question for a later
+phase — not answered here.
+
+---
+
 ## Status of the Phase 1 gate
 
 | Question | Verdict | Blocking? |
