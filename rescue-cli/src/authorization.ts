@@ -48,8 +48,20 @@ export interface AuthorizationWindow {
   signedAt: number;
 }
 
-/** How many future nonces to cover by default. Each costs ~25k gas if submitted. */
-export const DEFAULT_WINDOW_SIZE = 16;
+/**
+ * How many future nonces to cover by default.
+ *
+ * Sized against what it costs an attacker to burn through it, not against what it costs us to
+ * hold. Invalidating one authorization means spending one nonce, and a sponsor can do that for
+ * ~25k gas per authorization — cheap enough that a small window is not a real obstacle to
+ * someone paying attention. A wide window turns "lock them out" into "pay gas repeatedly, in
+ * public, for hours, until the epoch boundary".
+ *
+ * The cost to us is one wallet signature per nonce at onboarding and a stored signature each.
+ * That is a UX cost, not a runtime one, and it is worth paying: an exhausted window is
+ * unrecoverable without the user re-signing, which they may no longer be able to do safely.
+ */
+export const DEFAULT_WINDOW_SIZE = 64;
 
 /**
  * Select the authorizations worth submitting given the account's current nonce.

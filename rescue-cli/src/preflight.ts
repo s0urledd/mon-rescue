@@ -48,6 +48,38 @@ export const MIN_BASE_FEE_PER_GAS = 100_000_000_000n; // 100 gwei
 export const DEFAULT_RESCUE_GAS_LIMIT = 350_000n;
 
 /**
+ * Operator policy: what we are willing to burn to win.
+ *
+ * The rescued position is worth far more than any plausible fee, so the objective function is
+ * probability of success, not cost. A rescue that spends 500 MON on gas and works beats one
+ * that spends 5 and loses. This budget exists so that "spend aggressively" is a bounded,
+ * deliberate decision rather than an unbounded loop.
+ *
+ * Override with RESCUE_GAS_BUDGET_MON.
+ */
+export const DEFAULT_GAS_BUDGET = 500_000_000_000_000_000_000n; // 500 MON
+
+export function gasBudgetFromEnv(): bigint {
+  const raw = process.env.RESCUE_GAS_BUDGET_MON;
+  if (!raw) return DEFAULT_GAS_BUDGET;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`RESCUE_GAS_BUDGET_MON must be a positive number of MON, got "${raw}"`);
+  }
+  return BigInt(Math.round(parsed * 1e6)) * 10n ** 12n;
+}
+
+/**
+ * How many attempts a budget affords at a given gas limit and price. Used to size the spray
+ * from the budget rather than from a guess.
+ */
+export function attemptsAffordable(budget: bigint, gasLimit: bigint, gasPrice: bigint): number {
+  const perAttempt = gasLimit * gasPrice;
+  if (perAttempt === 0n) return 0;
+  return Number(budget / perAttempt);
+}
+
+/**
  * How many attempts can be inflight simultaneously, given the reserve-balance rule
  * `sum(gas_price * gas_limit) <= min(10 MON, lagged balance)`.
  *
