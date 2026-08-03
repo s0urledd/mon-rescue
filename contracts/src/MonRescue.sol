@@ -32,11 +32,12 @@ contract MonRescue {
     /// @notice The one and only destination for rescued funds. Immutable by design.
     address public immutable SAFE_ADDRESS;
 
-    /// @notice Address permitted to trigger a rescue, in addition to the account itself.
+    /**
+     * @notice The intended primary trigger. Published as metadata, NOT as a permission —
+     * `rescue()` and `sweep()` are callable by anyone. See the note above `rescue()`.
+     */
     address public immutable GUARDIAN;
 
-    error ZeroSafeAddress();
-    error SafeAddressIsPrecompile();
     /**
      * @notice Per-call gas cap for precompile calls.
      * @dev The staking precompile "consumes all gas" when given invalid arguments, so an
@@ -44,7 +45,8 @@ contract MonRescue {
      */
     uint256 internal constant WITHDRAW_GAS_CAP = 400_000;
 
-    error NotAuthorized();
+    error ZeroSafeAddress();
+    error SafeAddressIsPrecompile();
     error LengthMismatch();
     error SweepFailed();
     error NothingToSweep();
@@ -55,7 +57,7 @@ contract MonRescue {
 
     /**
      * @param safeAddress Destination for every rescue. Cannot be changed afterwards.
-     * @param guardian Address allowed to trigger the rescue on the user's behalf.
+     * @param guardian Intended primary trigger, recorded for off-chain identification only.
      */
     constructor(address safeAddress, address guardian) {
         if (safeAddress == address(0)) revert ZeroSafeAddress();
@@ -68,16 +70,22 @@ contract MonRescue {
     }
 
     /**
-     * @dev When delegated via 7702, `address(this)` is the user's EOA, so this permits the
-     * user themselves as well as the guardian. Both are safe: neither can choose a
-     * destination.
-     */
-    modifier onlyAuthorized() {
-        if (msg.sender != GUARDIAN && msg.sender != address(this)) revert NotAuthorized();
-        _;
-    }
-
-    /**
+     * @dev Deliberately NOT access-controlled.
+     *
+     * Access control on a destination-locked function buys nothing and costs liveness. Funds
+     * can only ever reach SAFE_ADDRESS, so the worst an arbitrary caller can do is pay gas to
+     * move the user's money to the user's own safe address. Even the attacker calling this is
+     * a win for us.
+     *
+     * What restricting it WOULD cost is the thing that actually kills a rescue: if only the
+     * guardian can fire, then the guardian being offline, rate-limited, or out of gas at the
+     * unlock moment loses the funds. Leaving it open means the user's own machine, a friend,
+     * a keeper, and our daemon can all race to fire it, and only the first one to land pays.
+     * Redundancy beats exclusivity when the failure mode is "nobody fired in time".
+     *
+     * GUARDIAN is retained as published metadata so watchers can identify the intended
+     * primary trigger, not as a permission.
+     *
      * @notice Claim matured withdrawals and sweep the proceeds to the safe address, atomically.
      * @param validatorIds Validators to withdraw from.
      * @param withdrawIds Matching withdrawal slot for each validator.
@@ -96,7 +104,7 @@ contract MonRescue {
         uint64[] calldata validatorIds,
         uint8[] calldata withdrawIds,
         bool claimRewardsToo
-    ) external onlyAuthorized {
+    ) external {
         if (validatorIds.length != withdrawIds.length) revert LengthMismatch();
 
         // Captured before any withdrawal credits the account, because the reserve floor is
@@ -154,7 +162,7 @@ contract MonRescue {
      * staked MON into liquid MON sitting in an EOA still delegated to this contract, so it
      * becomes rescuable without waiting for an epoch boundary.
      */
-    function sweep() external onlyAuthorized {
+    function sweep() external {
         _sweep(address(this).balance, 0);
     }
 

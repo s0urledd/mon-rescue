@@ -180,6 +180,44 @@ rescue window.
 - Critically: *"A round is not a block — rounds increment even on missed proposals. You cannot
   calculate epoch boundaries with modular arithmetic on block numbers. Always use `getEpoch()`."*
 
+### CORRECTION — the unlock IS largely predictable, measured
+
+An earlier version of this document concluded "there is no known unlock block" and designed
+for blind polling. That was an over-reading of the documentation's warning. Measured on
+testnet, with two independent archive nodes agreeing on every value:
+
+| epoch | boundary block | first block of epoch | delay |
+|---|---|---|---|
+| 1009 | 50,400,000 | 50,404,999 | 4,999 |
+| 1010 | 50,450,000 | 50,454,999 | 4,999 |
+| 1011 | 50,500,000 | 50,504,999 | 4,999 |
+| 1012 | 50,550,000 | 50,554,962 | 4,962 |
+
+Two facts follow:
+
+1. **The boundary block is exactly `(epoch - 1) × 50,000`.** That is plain arithmetic on block
+   height, and it held for every epoch measured. `inEpochDelayPeriod` is already `true` at
+   that block.
+2. **The epoch then begins within `EPOCH_DELAY_ROUNDS` (5,000) of the boundary.** Rounds
+   advance at least as fast as blocks — a missed proposal burns a round without producing a
+   block — so the delay measured *in blocks* is bounded above by 5,000 and can only come in
+   under it. Observed range: 4,962–4,999.
+
+So the unlock is predictable to within about **40 blocks — roughly 12 seconds** at the
+observed cadence. The documentation's warning ("you cannot calculate epoch boundaries with
+modular arithmetic on block numbers") is about the *exact* block, not about total
+unpredictability.
+
+**Why this matters operationally:** it replaces four hours of blind polling with a ~30-second
+burst. `packages/shared/src/schedule.ts` implements the phases — `idle` (sleep, poll every
+30s), `approaching` (past the boundary, poll every 2s), `burst` (inside the flip window, poll
+at the benchmark floor), `due`. That also means the rate limit we would have burned idling is
+available exactly when it is needed.
+
+Measured block cadence was **~0.301 s/block**, so an epoch is about **4.2 hours**, not the
+~5.5 hours the documentation implies — the docs appear to assume 400ms blocks. Never schedule
+against wall-clock; use block heights.
+
 ### Design consequence — this breaks a briefing assumption
 
 The briefing planned to "pre-stage the claim+transfer and fire at a **known unlock block**".
@@ -412,6 +450,103 @@ Two further constraints that bite the hot path specifically:
 - **Included-but-reverted is a normal outcome.** Proposers cannot see current state, so a
   transaction that overspends is still included and still pays gas. The tooling must
   distinguish "not included" from "included and reverted" rather than treating both as failure.
+
+---
+
+## Q9 — What actually fires the rescue? (the mechanism question)
+
+Everything above says *when*. This says *who and how*, which turns out to have a
+counter-intuitive answer.
+
+### The unstake → withdraw timeline, concretely
+
+```
+epoch n         undelegate(valId, amount, withdrawId)
+                  -> creates a withdrawal request; stake stops earning
+                  -> claimable at epoch n+2 (request before the boundary block)
+                                or epoch n+3 (request after it)
+                     because WITHDRAWAL_DELAY = 1 and the request lands in n+1 or n+2
+
+...wait 2-3 epochs, roughly 8-13 hours at ~4.2h per epoch...
+
+boundary block  = (targetEpoch - 1) x 50,000        <- deterministic
++4,900 blocks   -> earliest the epoch can begin      <- start burst-polling here
++5,000 blocks   -> latest the epoch can begin        <- it has flipped by now
+
+epoch target    withdraw(valId, withdrawId) pays msg.sender
+                  -> in our design, the SAME transaction sweeps to the safe address
+```
+
+Worked example from a live reading: at epoch 1012, block 50,576,907, undelegating right then
+gives an unlock epoch of **1014**, boundary block **50,650,000**, and the epoch beginning
+between blocks **50,654,900 and 50,655,000** — about 6.1 hours out.
+
+### Four ways to fire it, and why three of them are wrong
+
+**(a) The contract fires itself.** *Impossible.* Nothing on an EVM chain self-executes; every
+state change needs someone to send a transaction and pay gas. There is no `onTimer` hook. Any
+design that says "the contract sends automatically at the unlock" is really design (b) or (d)
+with the keeper left unspecified. Worth stating plainly because it is the most natural thing
+to assume.
+
+**(b) The user does withdraw + send manually.** Works, but it is two transactions with a gap
+between them, and it needs the user awake and watching at a boundary that lands at an
+arbitrary hour. Against an automated drainer the gap is the whole vulnerability. This is the
+thing our atomic single transaction exists to replace.
+
+**(c) A guardian-only daemon.** What we built first, and it has a single point of failure that
+is precisely aligned with the moment of maximum stakes: if our process is down, rate-limited,
+out of gas, or mid-deploy at the unlock block, the funds are lost and nothing else can act.
+
+**(d) Permissionless trigger — adopted.** `rescue()` and `sweep()` are callable by **anyone**.
+
+This looks reckless and is not, because of the destination lock: funds can only ever reach
+`SAFE_ADDRESS`. The worst an arbitrary caller can do is pay gas to move the user's money to
+the user's own safe address. **Even the attacker calling it is a win for us.** Access control
+here would buy nothing and cost the one thing that actually matters — liveness.
+
+So the trigger set becomes: our daemon, the user's own machine, a friend's script, any keeper,
+all racing, first to land wins and only that one pays. Redundancy beats exclusivity when the
+failure mode is "nobody fired in time". `GUARDIAN` remains on the contract as published
+metadata identifying the intended primary trigger, not as a permission.
+
+### What the daemon does during the wait
+
+It is not a busy loop. It sleeps through `idle`, wakes as the boundary block approaches, holds
+a pre-signed transaction (and a pre-signed fee ladder) in memory, and bursts only inside the
+~100-block flip window. Signing anything at fire time would add milliseconds at the moment
+they are most expensive.
+
+---
+
+## Q10 — The `withdrawId` griefing vector, re-examined
+
+An earlier version listed this as an unmitigated attack and overstated it. Correcting.
+
+**The mechanism:** `undelegate` reverts if a pending withdrawal already occupies the same
+`withdrawId`, and `withdrawId` is a `uint8`. Storage is keyed
+`(validatorId, msg.sender, withdrawId)`, so the 256 slots belong to **the delegator**, not to
+the world. Only someone holding the user's key can fill them — which the attacker does.
+
+**It does not cancel an existing undelegation.** A withdrawal request already created while
+the wallet was safe cannot be removed by filling slots; it still matures and is still
+claimable. The vector only blocks the creation of *new* requests.
+
+**Why it is weaker than it first appears:** filling slots costs the attacker 256 transactions,
+and if they fill them with real stake they have unbonded that stake into 256 claimable
+requests — all of which pay `msg.sender`, i.e. the account we are delegated to, and all of
+which our batch `rescue(uint64[], uint8[], bool)` can drain. Griefing us that way hands us the
+funds.
+
+**Where it still bites:** if `undelegate` permits dust-sized amounts, the attacker can fill all
+256 slots for a negligible cost while leaving the bulk of the stake bonded, and we then cannot
+create a withdrawal request for the real position. Our counter is to `withdraw()` the dust
+slots to free them and then undelegate — which costs an epoch, so it is a delay rather than a
+permanent block, and it is very loud on-chain.
+
+**Status: UNVERIFIED.** Whether `undelegate` enforces a minimum amount decides whether this is
+a real vector or a self-defeating one. `DUST_THRESHOLD` (1 gwei) is documented for `delegate`;
+whether it also applies to `undelegate` is not stated. This needs a testnet script.
 
 ---
 
