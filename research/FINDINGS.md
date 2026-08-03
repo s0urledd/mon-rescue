@@ -453,6 +453,45 @@ Two further constraints that bite the hot path specifically:
 
 ---
 
+## Q12 — Epoch-transition mechanics (two exploitable details)
+
+### The flip block is targetable — the epoch changes in transaction 0
+
+Measured at the epoch 1011→1012 transition, block 50,554,962:
+
+| txIndex | selector | what |
+|---|---|---|
+| 0 | `0x1d4e9f02` | `syscallOnEpochChange(uint64)` — emits `EpochChanged` |
+| 1 | `0x791bdcf3` | `syscallReward(address)` |
+| 2+ | — | ordinary user transactions |
+
+The epoch advances in the **first transaction of the block**, before any user transaction runs.
+So a `withdraw()` landing in the flip block itself already sees the new epoch and succeeds.
+
+**Aim at the flip block, not the block after it.** Targeting one block late concedes 300ms and a
+whole block's worth of competing transactions for no reason.
+
+### The boundary block moves maturity by a full epoch
+
+The snapshot for the next epoch is taken at the **start** of the boundary block, before user
+transactions. So for an `undelegate`:
+
+- landing **before** the boundary block → activates at `n+1`, matures at `n+2`
+- landing **in or after** the boundary block → activates at `n+2`, matures at `n+3`
+
+That is a difference of one full epoch — about **4.2 hours** — decided purely by which side of a
+single block the transaction lands on.
+
+In an emergency this is the largest lever available on the clock, and it is invisible unless
+specifically checked. `undelegateTiming()` computes the deadline and the emergency intake prints
+it before anything else, including in the case where nothing has been unbonded yet — which is
+exactly when the advice is worth the most.
+
+Worked example from a live run: at epoch 1012, block 50,582,959, the deadline was block
+50,600,000 — about 1.42 hours to act before the cost became an extra 4.2 hours of waiting.
+
+---
+
 ## Q9 — What actually fires the rescue? (the mechanism question)
 
 Everything above says *when*. This says *who and how*, which turns out to have a

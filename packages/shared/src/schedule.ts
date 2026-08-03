@@ -136,6 +136,72 @@ export function advise(input: ScheduleInput): ScheduleAdvice {
 }
 
 /**
+ * The block before which an `undelegate` must land to avoid losing a full epoch.
+ *
+ * Measured/documented behaviour: the snapshot for the next epoch is taken at the START of the
+ * boundary block, before user transactions. So an undelegate that lands *before* the boundary
+ * block activates at `n+1` and matures at `n+2`; one that lands in the boundary block or later
+ * activates at `n+2` and matures at `n+3`.
+ *
+ * That difference is a whole epoch — about 4.2 hours at the measured cadence. In an emergency
+ * it is the single largest lever available on the clock, and it is invisible unless you are
+ * looking for it.
+ */
+export function undelegateDeadlineBlock(current: EpochState): bigint {
+  // While inEpochDelayPeriod is false we are still before this epoch's boundary block and can
+  // still make the earlier activation. Once true, the boundary has passed and the next chance
+  // is the following epoch's boundary.
+  const targetEpoch = current.inEpochDelayPeriod ? current.epoch + 2n : current.epoch + 1n;
+  return boundaryBlockFor(targetEpoch);
+}
+
+export interface UndelegateTiming {
+  /** Activation epoch if undelegating right now. */
+  activationEpoch: bigint;
+  /** Epoch at which the resulting withdrawal matures. */
+  maturityEpoch: bigint;
+  /** Land the undelegate strictly before this block to keep the earlier activation. */
+  deadlineBlock: bigint;
+  blocksRemaining: bigint;
+  /** True when the boundary has already passed and an extra epoch is unavoidable. */
+  missedThisBoundary: boolean;
+}
+
+/**
+ * What undelegating right now would cost, and how long is left to beat the boundary.
+ */
+export function undelegateTiming(
+  current: EpochState,
+  currentBlock: bigint,
+): UndelegateTiming {
+  const activationEpoch = current.epoch + (current.inEpochDelayPeriod ? 2n : 1n);
+  const deadlineBlock = undelegateDeadlineBlock(current);
+  const blocksRemaining = deadlineBlock > currentBlock ? deadlineBlock - currentBlock : 0n;
+  return {
+    activationEpoch,
+    maturityEpoch: activationEpoch + STAKING_CONSTANTS.WITHDRAWAL_DELAY,
+    deadlineBlock,
+    blocksRemaining,
+    missedThisBoundary: current.inEpochDelayPeriod,
+  };
+}
+
+/**
+ * The epoch transition happens in the FIRST transaction of the flip block.
+ *
+ * Verified on testnet at block 50,554,962: transaction index 0 is
+ * `syscallOnEpochChange(uint64)` (selector 0x1d4e9f02), which emits `EpochChanged`, followed by
+ * `syscallReward` at index 1 and ordinary user transactions after that.
+ *
+ * The consequence is worth stating plainly: **a transaction in the flip block itself already
+ * sees the new epoch.** The withdrawal is claimable within that block, so the flip block is the
+ * target — not the block after it. Aiming one block late concedes 300ms and, more importantly,
+ * a whole block of competing transactions.
+ */
+export const EPOCH_CHANGE_SYSCALL_SELECTOR = '0x1d4e9f02' as const;
+export const FLIP_BLOCK_IS_CLAIMABLE = true;
+
+/**
  * Rough wall-clock estimate for a number of epochs. Deliberately labelled an estimate: an
  * epoch is round-driven, and the observed testnet cadence (~0.30s/block, so ~4.2h per epoch)
  * is faster than the ~5.5h the documentation implies at 0.4s blocks. Never schedule against
