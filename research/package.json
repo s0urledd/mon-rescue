@@ -15,7 +15,9 @@
     "script:d": "tsx src/script-d-guardian.ts",
     "bench": "tsx src/bench-latency.ts",
     "deploy": "tsx src/deploy.ts",
-    "stake": "tsx src/setup-stake.ts"
+    "stake": "tsx src/setup-stake.ts",
+    "make-window": "tsx src/make-window.ts",
+    "adversary": "tsx src/adversary.ts"
   },
   "dependencies": {
     "@monrescue/shared": "workspace:*",
