@@ -161,3 +161,32 @@ The honest claim is bounded: MonRescue materially improves the odds for unbondin
 an unattended or unsophisticated drainer, and offers no cryptographic guarantee against an
 alert one. The only design that defeats a live seed holder is a smart account with a withdrawal
 timelock and a guardian veto — a migration, not a retrofit.
+
+---
+
+## Operating this as a service — the one constraint that bites
+
+If we rescue several customers, the binding limit is not RPC capacity or CPU. It is that
+**Monad's inflight gas cap is per account**: the sum of `gas_price × gas_limit` across an
+account's transactions from the last 3 blocks must stay under `min(10 MON, lagged balance)`.
+
+That cap belongs to the *guardian address*, not to the customer. So a single guardian key
+spraying for two customers whose positions mature in the same epoch splits one budget between
+them — and epochs are shared, so simultaneous maturity is the normal case, not an edge one.
+
+At 350k gas and a 20x fee multiplier the budget affords a few dozen inflight attempts. One
+customer can consume all of it.
+
+**Therefore: one guardian key per concurrently-armed customer.** Guardians are cheap — a
+keypair and >10 MON — and they choose nothing, since the destination is immutable in each
+customer's own contract. A stolen guardian key cannot redirect funds; it can only pay gas to
+move a customer's money to that customer's own safe address. So a pool of them carries no extra
+custody risk, which is exactly what makes this the easy fix rather than a hard one.
+
+The current CLI is one process per customer, which already implies this. It is worth stating
+because the failure mode is silent: a shared guardian does not error, it just has its retries
+throttled at the unlock block, which is indistinguishable from ordinary bad luck.
+
+**Not yet decided:** whether a success fee is taken on-chain. It cannot come out of the rescue
+contract without weakening the destination lock, which is the property the whole design rests
+on. Bill out of band.
