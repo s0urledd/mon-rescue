@@ -26,7 +26,7 @@ export function requireEnv(key: string): string {
   const v = process.env[key];
   if (!v) {
     throw new Error(
-      `missing required environment variable ${key}. See research/.env.example. ` +
+      `missing required environment variable ${key}. See .env.example at the repo root. ` +
         `Secrets are passed at runtime and never committed.`,
     );
   }

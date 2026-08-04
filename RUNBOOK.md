@@ -25,7 +25,7 @@ no global mempool and proximity to the leader is what decides inclusion, not raw
 Take two things from its output:
 
 - **Ranked broadcast order** → paste into `RPC_POOL` in `packages/shared/src/chains.ts`.
-- **`EPOCH_POLL_MS`** → put in `rescue-cli/.env`.
+- **`EPOCH_POLL_MS`** → put in the repo-root `.env`.
 
 The benchmark ranks the poll endpoint by round-trip and the broadcast order by block-observation lead — different questions. Running beside your own node collapses detection latency by roughly an order of magnitude. Polling faster than the
 round-trip is wasted; the benchmark tells you where that floor is. **Re-run this on mainnet** —
@@ -51,7 +51,7 @@ Fund from https://faucet.monad.xyz.
 > near zero will have its retries throttled at exactly the moment it needs to retry. Keep it
 > comfortably above 10 MON.
 
-Copy `research/.env.example` to `research/.env` and fill it in.
+Copy `.env.example` to `.env` at the repo root and fill it in — every script loads it.
 
 ---
 
@@ -138,7 +138,7 @@ accepts a recipient address.
 ## Step 7 — arm the hot path
 
 ```bash
-cd rescue-cli && cp .env.example .env   # fill in, then:
+# config lives in the repo-root .env
 CHAIN_ID=10143 pnpm --filter @monrescue/rescue-cli arm
 ```
 

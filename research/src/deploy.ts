@@ -88,7 +88,20 @@ async function main() {
   console.log(`on-chain SAFE_ADDRESS: ${onchainSafe} ${locked ? '(locked correctly)' : '!! MISMATCH'}`);
   if (!locked) throw new Error('destination lock mismatch — do not use this deployment');
 
-  console.log(`\nAdd to research/.env:\n  RESCUE_CONTRACT=${address}`);
+  console.log(`\nAdd to the repo-root .env:\n  RESCUE_CONTRACT=${address}`);
+  console.log(`\n  echo "RESCUE_CONTRACT=${address}" >> .env`);
+
+  // Catch an underfunded guardian now rather than at the unlock block. Monad caps an account's
+  // gas across its inflight transactions at min(10 MON, lagged balance) over 3 blocks, so a thin
+  // guardian is throttled at exactly the moment it needs to retry.
+  const guardianBalance = await publicClient.getBalance({ address: guardian });
+  console.log(`\nguardian balance: ${formatEther(guardianBalance)} MON`);
+  if (guardianBalance < 10_000_000_000_000_000_000n) {
+    console.warn(
+      `  WARNING: below 10 MON. Monad caps per-account inflight gas at min(10 MON, lagged\n` +
+        `  balance) over 3 blocks, so retries get throttled precisely when they matter. Top it up.`,
+    );
+  }
 
   await writeArtifact(`deploy-${CHAIN_ID}-${address.slice(0, 10)}`, {
     chainId: CHAIN_ID,
