@@ -19,6 +19,11 @@
  *
  * Output is an ordered broadcast pool and a recommended poll interval.
  */
+import { config as loadEnv } from 'dotenv';
+// Load the repo-root .env first, then any package-local one. dotenv never overrides an
+// already-set variable, so package-local and real environment variables both win over the root.
+loadEnv({ path: new URL('../../.env', import.meta.url).pathname, quiet: true });
+loadEnv({ quiet: true });
 import { createPublicClient, http } from 'viem';
 import { chainById, RPC_POOL, getEpoch, publicClientFor } from '@monrescue/shared';
 import { writeArtifact } from './lib.js';

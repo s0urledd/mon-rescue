@@ -8,6 +8,11 @@
  * It must never become the production path. If a version of this ever reads a protected user's
  * key, the security model is gone.
  */
+import { config as loadEnv } from 'dotenv';
+// Load the repo-root .env first, then any package-local one. dotenv never overrides an
+// already-set variable, so package-local and real environment variables both win over the root.
+loadEnv({ path: new URL('../../.env', import.meta.url).pathname, quiet: true });
+loadEnv({ quiet: true });
 import { createWalletClient, http, getAddress } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { writeFileSync } from 'node:fs';

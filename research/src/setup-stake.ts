@@ -9,6 +9,11 @@
  * The unbonding wait is one full epoch (~5.5h), so run `undelegate` and then come back.
  * `status` tells you when to run Script B.
  */
+import { config as loadEnv } from 'dotenv';
+// Load the repo-root .env first, then any package-local one. dotenv never overrides an
+// already-set variable, so package-local and real environment variables both win over the root.
+loadEnv({ path: new URL('../../.env', import.meta.url).pathname, quiet: true });
+loadEnv({ quiet: true });
 import { createWalletClient, http, formatEther, parseEther, encodeFunctionData } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import {

@@ -26,6 +26,9 @@ importers:
       '@monrescue/shared':
         specifier: workspace:*
         version: link:../packages/shared
+      dotenv:
+        specifier: ^17.4.2
+        version: 17.4.2
       viem:
         specifier: ^2.21.0
         version: 2.55.10(typescript@5.9.3)
@@ -45,6 +48,9 @@ importers:
       '@monrescue/shared':
         specifier: workspace:*
         version: link:../packages/shared
+      dotenv:
+        specifier: ^17.4.2
+        version: 17.4.2
       viem:
         specifier: ^2.21.0
         version: 2.55.10(typescript@5.9.3)
@@ -64,6 +70,9 @@ importers:
       '@monrescue/shared':
         specifier: workspace:*
         version: link:../packages/shared
+      dotenv:
+        specifier: ^17.4.2
+        version: 17.4.2
       viem:
         specifier: ^2.21.0
         version: 2.55.10(typescript@5.9.3)
@@ -274,6 +283,10 @@ packages:
       zod:
         optional: true
 
+  dotenv@17.4.2:
+    resolution: {integrity: sha512-nI4U3TottKAcAD9LLud4Cb7b2QztQMUEfHbvhTH09bqXTxnSie8WnjPALV/WMCrJZ6UV/qHJ6L03OqO3LcdYZw==}
+    engines: {node: '>=12'}
+
   esbuild@0.28.1:
     resolution: {integrity: sha512-HrJrvZv5ayxBzPfwphOoNzkzOIIlifzk0KJrGK2c8R4+LKpMtpYLQeUdjnwjWv/LZlkH2laZk+4w78pi99D4Vw==}
     engines: {node: '>=18'}
@@ -443,6 +456,8 @@ snapshots:
   abitype@1.2.3(typescript@5.9.3):
     optionalDependencies:
       typescript: 5.9.3
+
+  dotenv@17.4.2: {}
 
   esbuild@0.28.1:
     optionalDependencies:
