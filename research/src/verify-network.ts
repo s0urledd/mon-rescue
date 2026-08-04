@@ -5,11 +5,11 @@
  * FINDINGS.md. It exists so the claims stay falsifiable: if Monad changes the staking
  * precompile or its ABI, this fails loudly instead of the findings silently rotting.
  */
-import { config as loadEnv } from 'dotenv';
-// Load the repo-root .env first, then any package-local one. dotenv never overrides an
-// already-set variable, so package-local and real environment variables both win over the root.
-loadEnv({ path: new URL('../../.env', import.meta.url).pathname, quiet: true });
-loadEnv({ quiet: true });
+// Load .env with no dependency: node's built-in loader, repo root first then package-local.
+// Both are optional, and a real environment variable always wins over either.
+for (const p of ['../../.env', '../.env', '.env']) {
+  try { process.loadEnvFile(new URL(p, import.meta.url).pathname); } catch { /* absent */ }
+}
 import { publicClientFor, getEpoch, getValidator, withdrawableAtEpoch, STAKING_PRECOMPILE, RESERVE_PRECOMPILE, RPC_POOL } from '@monrescue/shared';
 import { createPublicClient, http, toFunctionSelector, toEventSelector } from 'viem';
 import { chainById } from '@monrescue/shared';

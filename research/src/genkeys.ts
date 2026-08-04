@@ -1,6 +1,7 @@
-import { config as loadEnv } from 'dotenv';
-loadEnv({ path: new URL('../../.env', import.meta.url).pathname, quiet: true });
-loadEnv({ quiet: true });
+// Load .env with no dependency: node's built-in loader, repo root first then package-local.
+for (const p of ['../../.env', '../.env', '.env']) {
+  try { process.loadEnvFile(new URL(p, import.meta.url).pathname); } catch { /* absent */ }
+}
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 
 /**
