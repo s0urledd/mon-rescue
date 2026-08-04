@@ -50,12 +50,12 @@ contract without a payable receive would make it fail.
 ## Block 1 — Deploy and prove EIP-7702 works at all (~20 min)
 
 ```bash
-cd contracts && npm i solc && node build.mjs && cd ..
-CHAIN_ID=10143 pnpm --filter @monrescue/research deploy      # -> RESCUE_CONTRACT
+pnpm run build:contracts
+CHAIN_ID=10143 pnpm --filter @monrescue/research deploy:contract   # -> RESCUE_CONTRACT
 CHAIN_ID=10143 pnpm --filter @monrescue/research script:a
 ```
 
-`deploy` reads `SAFE_ADDRESS()` back off-chain and aborts on mismatch, so the destination lock
+`deploy:contract` reads `SAFE_ADDRESS()` back off-chain and aborts on mismatch, so the destination lock
 is verified rather than assumed.
 
 `script:a` submits a type-`0x04` and asserts the account's code becomes exactly

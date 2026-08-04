@@ -14,12 +14,12 @@
     "script:c": "tsx src/script-c-reserve.ts",
     "script:d": "tsx src/script-d-guardian.ts",
     "bench": "tsx src/bench-latency.ts",
-    "deploy": "tsx src/deploy.ts",
     "stake": "tsx src/setup-stake.ts",
     "make-window": "tsx src/make-window.ts",
     "adversary": "tsx src/adversary.ts",
     "boundary": "tsx src/boundary-experiment.ts",
-    "genkeys": "tsx src/genkeys.ts"
+    "genkeys": "tsx src/genkeys.ts",
+    "deploy:contract": "tsx src/deploy.ts"
   },
   "dependencies": {
     "@monrescue/shared": "workspace:*",

@@ -27,7 +27,7 @@ Take two things from its output:
 - **Ranked broadcast order** → paste into `RPC_POOL` in `packages/shared/src/chains.ts`.
 - **`EPOCH_POLL_MS`** → put in `rescue-cli/.env`.
 
-Testnet run on 2026-08-03 produced ~116ms expected detection latency. Polling faster than the
+The benchmark ranks the poll endpoint by round-trip and the broadcast order by block-observation lead — different questions. Running beside your own node collapses detection latency by roughly an order of magnitude. Polling faster than the
 round-trip is wasted; the benchmark tells you where that floor is. **Re-run this on mainnet** —
 the ranking there will not be the same, and the endpoint that wins on testnet is not
 guaranteed to win on mainnet.
@@ -58,8 +58,8 @@ Copy `research/.env.example` to `research/.env` and fill it in.
 ## Step 2 — build and deploy the rescue contract
 
 ```bash
-cd contracts && npm i solc && node build.mjs && cd ..
-CHAIN_ID=10143 pnpm --filter @monrescue/research deploy
+pnpm run build:contracts
+CHAIN_ID=10143 pnpm --filter @monrescue/research deploy:contract
 ```
 
 `deploy` refuses to proceed if `SAFE_ADDRESS` is a precompile, and after deployment it reads
@@ -98,7 +98,7 @@ CHAIN_ID=10143 ACTION=undelegate VALIDATOR_ID=1 AMOUNT=100 pnpm --filter @monres
 flags any disagreement — the staking reference is ambiguous about which epoch that field
 records, so **the on-chain value is authoritative** and any mismatch belongs in FINDINGS.md.
 
-Then wait. `WITHDRAWAL_DELAY` is one epoch, and an epoch is roughly 5.5 hours. Poll with
+Then wait. `WITHDRAWAL_DELAY` is one epoch, and an epoch is ~4.2h at the measured 0.301s block time. Poll with
 `ACTION=status` until it prints `CLAIMABLE NOW`.
 
 ---

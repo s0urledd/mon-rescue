@@ -145,31 +145,62 @@ async function main() {
   }
 
   // --- results -------------------------------------------------------------
-  // Rank by observation lag first: proximity to the leader beats raw round-trip, because
-  // inclusion depends on reaching the leader, not on how fast a node answers reads.
-  const ranked = live
+  // Polling and broadcasting are DIFFERENT questions and must be ranked differently.
+  //
+  //  - Detection latency is bounded by the round-trip of the endpoint we poll. Nothing else
+  //    enters into it. A co-located node answering in 3ms beats a remote one answering in 53ms
+  //    by a factor of ~12, regardless of where either sits relative to the leader.
+  //
+  //  - Inclusion depends on reaching the leader, so broadcast order is ranked by which endpoint
+  //    reports new blocks first. `firstToSeeBlock` is the cleaner signal here: mean lag is noisy
+  //    when two endpoints are near-simultaneous, because each one's lag is only sampled on the
+  //    rounds it happens to lose.
+  //
+  // An earlier version ranked both by lag and recommended polling a remote endpoint over a
+  // local node, throwing away an order of magnitude of detection latency.
+  const byRoundTrip = live.map((u) => stats.get(u)!).sort((a, b) => a.epochP50 - b.epochP50);
+  const byLeaderProximity = live
     .map((u) => stats.get(u)!)
-    .sort((a, b) => (a.meanLagMs || 1e9) - (b.meanLagMs || 1e9) || a.callP50 - b.callP50);
+    .sort((a, b) => b.firstToSeeBlock - a.firstToSeeBlock || (a.meanLagMs || 1e9) - (b.meanLagMs || 1e9));
 
-  console.log(`\n=== ranked broadcast order ===`);
-  ranked.forEach((s, i) => {
+  console.log(`\n=== broadcast order (closest to the leader first) ===`);
+  byLeaderProximity.forEach((s, i) => {
     console.log(
-      `  ${i + 1}. ${s.url}\n     lag=${s.meanLagMs}ms firstToSeeBlock=${s.firstToSeeBlock} blockNumber_p50=${s.callP50}ms getEpoch_p50=${s.epochP50}ms`,
+      `  ${i + 1}. ${s.url}\n     firstToSeeBlock=${s.firstToSeeBlock} lag=${s.meanLagMs}ms`,
     );
   });
 
-  const best = ranked[0];
-  if (best) {
-    // Polling faster than the round-trip cannot reduce detection latency; it only consumes
-    // rate limit. Round up to a sane floor.
-    const recommendedPoll = Math.max(100, Math.round(best.epochP50));
-    const meanDetection = Math.round(recommendedPoll / 2 + best.epochP50);
+  console.log(`\n=== poll endpoint (lowest round-trip first) ===`);
+  byRoundTrip.forEach((s, i) => {
+    console.log(`  ${i + 1}. ${s.url}\n     getEpoch p50=${s.epochP50}ms blockNumber p50=${s.callP50}ms`);
+  });
+
+  const poll = byRoundTrip[0];
+  let recommendedPoll: number | null = null;
+  if (poll) {
+    // A sub-10ms round-trip means the node is effectively local, so there is no shared rate
+    // limit to protect and we can poll tightly. A remote endpoint gets a 100ms floor to avoid
+    // burning quota we will want during the burst.
+    const isLocal = poll.epochP50 < 10;
+    recommendedPoll = Math.max(isLocal ? 10 : 100, Math.round(poll.epochP50));
+    const meanDetection = Math.round(recommendedPoll / 2 + poll.epochP50);
+
     console.log(`\n=== recommendations ===`);
-    console.log(`  poll endpoint:     ${best.url}`);
-    console.log(`  EPOCH_POLL_MS:     ${recommendedPoll}`);
+    console.log(`  poll endpoint:  ${poll.url}${isLocal ? '  (local — poll tightly)' : ''}`);
+    console.log(`  EPOCH_POLL_MS:  ${recommendedPoll}`);
     console.log(`  expected detection latency: ~${meanDetection}ms (half a poll interval + one round-trip)`);
-    console.log(`\n  Polling faster than ${best.epochP50}ms cannot help — the round-trip dominates.`);
-    console.log(`  Set RPC_POOL order in packages/shared/src/chains.ts to the ranking above.`);
+    console.log(`\n  Polling faster than ${poll.epochP50}ms cannot help — the round-trip dominates.`);
+
+    const slowest = byRoundTrip[byRoundTrip.length - 1]!;
+    if (slowest.epochP50 > poll.epochP50 * 3) {
+      console.log(
+        `  Polling ${slowest.url} instead would cost ~${Math.round(
+          Math.max(100, slowest.epochP50) / 2 + slowest.epochP50,
+        )}ms — ${(slowest.epochP50 / Math.max(1, poll.epochP50)).toFixed(0)}x worse. Use the local node.`,
+      );
+    }
+    console.log(`\n  Set MONAD_HTTP_URL=${poll.url} (or MONAD_IPC_PATH if the node is on this host).`);
+    console.log(`  Set RPC_POOL order in packages/shared/src/chains.ts to the broadcast ranking.`);
   }
 
   await writeArtifact(`bench-latency-${CHAIN_ID}`, {
@@ -177,8 +208,9 @@ async function main() {
     samples: SAMPLES,
     raceSeconds: RACE_SECONDS,
     endpoints: [...stats.values()],
-    rankedBroadcastOrder: ranked.map((s) => s.url),
-    recommendedPollMs: best ? Math.max(100, Math.round(best.epochP50)) : null,
+    rankedBroadcastOrder: byLeaderProximity.map((s) => s.url),
+    recommendedPollEndpoint: poll?.url ?? null,
+    recommendedPollMs: recommendedPoll,
   });
 }
 

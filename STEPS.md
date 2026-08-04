@@ -73,8 +73,8 @@ exact moment they matter.
 ## 3. Deploy the rescue contract
 
 ```bash
-cd contracts && npm i solc && node build.mjs && cd ..
-pnpm --filter @monrescue/research deploy
+pnpm run build:contracts
+pnpm --filter @monrescue/research deploy:contract
 ```
 
 Deploys one instance for this user with `SAFE_ADDRESS` immutable, then reads it back off-chain
@@ -256,7 +256,7 @@ attacker's transfer reverts on the reserve rule, the delegation is working as a 
 |---|---|---|
 | 1 | `pnpm install && pnpm --filter @monrescue/shared build` | — |
 | 2 | `... research verify` / `bench` | nothing funded |
-| 3 | `... research deploy` | `SAFE_ADDRESS`, `GUARDIAN_ADDRESS` |
+| 3 | `... research deploy:contract` | `SAFE_ADDRESS`, `GUARDIAN_ADDRESS` |
 | 4 | `... research script:a` | `RESCUE_CONTRACT` |
 | 5 | `ACTION=delegate ... research stake` | `VALIDATOR_ID`, `AMOUNT` |
 | 6 | `... rescue-cli emergency` then `ACTION=undelegate ...` | `VICTIM_ADDRESS` |

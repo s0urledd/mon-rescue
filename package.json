@@ -5,10 +5,19 @@
   "description": "Delegator-protection layer for Monad: staking alert engine and a destination-locked rescue path for compromised delegators.",
   "license": "MIT",
   "type": "module",
-  "workspaces": ["packages/*", "research", "watcher", "rescue-cli"],
+  "workspaces": [
+    "packages/*",
+    "research",
+    "watcher",
+    "rescue-cli"
+  ],
   "scripts": {
     "build": "pnpm -r --filter './packages/*' build && pnpm -r build",
-    "typecheck": "pnpm -r typecheck"
+    "typecheck": "pnpm -r typecheck",
+    "build:contracts": "node contracts/build.mjs"
   },
-  "packageManager": "pnpm@10.33.0"
+  "packageManager": "pnpm@10.33.0",
+  "devDependencies": {
+    "solc": "^0.8.28"
+  }
 }
