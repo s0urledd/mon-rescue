@@ -79,7 +79,7 @@ pnpm --filter @monrescue/shared build
 CHAIN_ID=10143 pnpm --filter @monrescue/research verify
 ```
 
-To close the remaining gate you need a funded testnet key (see `research/.env.example`), then
+To close the remaining gate you need a funded testnet key (see `.env.example` at the repo root), then
 run scripts A→D. Each writes its transaction hashes to `research/artifacts/`.
 
 ## Build
