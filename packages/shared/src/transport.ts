@@ -3,23 +3,30 @@ import type { PublicClient, Transport } from 'viem';
 import { chainById, RPC_POOL } from './chains.js';
 
 /**
- * Transport selection, ordered by latency.
+ * Transport selection.
  *
- * The hot path is latency-bound, and the single largest win available is not a faster remote
- * endpoint — it is not being remote at all. Running the daemon on the same machine as a Monad
- * node removes the network round-trip entirely, which the benchmark measured at ~50-70ms
- * against public HTTPS endpoints. That round-trip is the floor on how fast we can notice an
- * epoch transition, so removing it is worth more than any amount of tuning on top of it.
+ * **If you run your own node, it wins for everything.** Detection latency is bounded purely by
+ * the round-trip of whatever endpoint we poll, and a co-located node answers in single-digit
+ * milliseconds against 50-70ms for a public HTTPS endpoint. No amount of tuning on top of a
+ * remote endpoint recovers that gap. The public pool exists as failover, not as a peer.
  *
  * Preference order:
- *   1. IPC (unix socket) — same machine, no TCP, no TLS, no HTTP framing
+ *   1. IPC (unix socket) — same host, no TCP, no TLS, no HTTP framing
  *   2. WebSocket to localhost — persistent connection, no per-request handshake
- *   3. HTTP to localhost — still no network, but pays HTTP framing per call
- *   4. Remote HTTPS — the fallback, and what the public pool is for
+ *   3. HTTP to localhost — still no network, pays HTTP framing per call
+ *   4. Remote HTTPS — failover only
  *
- * Broadcast is a separate concern from polling: we still fan the signed transaction out to
- * every remote endpoint as well, because a local node forwards to only the leaders it knows
- * and redundancy costs nothing once the transaction is signed.
+ * **Why we still broadcast to several endpoints — and what that does NOT buy.**
+ *
+ * It does not reach more leaders. An RPC node forwards a transaction to the next `N = 3`
+ * upcoming leaders, and the leader schedule is deterministic and identical on every node, so
+ * every endpoint forwards to the *same* three. Submitting to five nodes does not widen leader
+ * coverage, and an earlier version of this comment claimed it did.
+ *
+ * What it actually buys is failover: our node being down, lagging, restarting or rate-limiting
+ * at the unlock block is the failure that silently loses the rescue, and it is not detectable
+ * from inside the process quickly enough to react. Fanning out costs nothing once the bytes are
+ * signed, so it is worth doing purely as insurance — but it is insurance, not an edge.
  */
 
 export interface TransportConfig {
@@ -113,6 +120,13 @@ export async function localFirstClient(cfg: TransportConfig): Promise<{
  *
  * MONAD_IPC_PATH is the one worth setting when the daemon shares a machine with a node.
  */
+/**
+ * Conventional local node endpoints. Used when nothing is configured, so that running beside a
+ * node needs no setup at all — the common case should not require remembering a variable.
+ */
+export const DEFAULT_LOCAL_HTTP = 'http://127.0.0.1:8080';
+export const DEFAULT_LOCAL_WS = 'ws://127.0.0.1:8081';
+
 export function transportConfigFromEnv(chainId: number): TransportConfig {
   return {
     chainId,
@@ -121,4 +135,48 @@ export function transportConfigFromEnv(chainId: number): TransportConfig {
     httpUrl: process.env.MONAD_HTTP_URL ?? process.env.RPC_URL,
     remoteUrls: RPC_POOL[chainId],
   };
+}
+
+/**
+ * Probe a local node and fall back to the public pool if it is not there.
+ *
+ * Preferred over `transportConfigFromEnv` at startup: it means a correctly-running local node is
+ * used automatically, and its absence is reported loudly rather than silently costing an order
+ * of magnitude of detection latency.
+ */
+export async function detectLocalNode(
+  chainId: number,
+  timeoutMs = 1500,
+): Promise<{ httpUrl?: string; wsUrl?: string; found: boolean; detail: string }> {
+  const httpUrl = process.env.MONAD_HTTP_URL ?? process.env.RPC_URL ?? DEFAULT_LOCAL_HTTP;
+  try {
+    const res = await fetch(httpUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const json = (await res.json()) as { result?: string };
+    const seen = json.result ? Number(BigInt(json.result)) : undefined;
+    if (seen !== chainId) {
+      return {
+        found: false,
+        detail: `${httpUrl} answered for chain ${seen}, expected ${chainId} — not using it`,
+      };
+    }
+    return {
+      httpUrl,
+      wsUrl: process.env.MONAD_WS_URL ?? DEFAULT_LOCAL_WS,
+      found: true,
+      detail: `local node at ${httpUrl} (chain ${seen})`,
+    };
+  } catch (e) {
+    return {
+      found: false,
+      detail:
+        `no local node at ${httpUrl} (${(e as Error).message.split('\n')[0]}). ` +
+        `Falling back to public endpoints, which costs roughly an order of magnitude of ` +
+        `detection latency.`,
+    };
+  }
 }

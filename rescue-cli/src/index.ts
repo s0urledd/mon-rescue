@@ -11,6 +11,7 @@ import {
   chainById, RPC_POOL, getEpoch, getWithdrawalRequest, planSweep, assertSweepAllowed,
   isClaimable, maturityEpoch, isEmptySlot, advise, boundaryBlockFor,
   earliestStartBlockFor, latestStartBlockFor, localFirstClient, transportConfigFromEnv,
+  detectLocalNode,
   discoverUnstakes, validatorIdsFrom,
 } from '@monrescue/shared';
 import { MONRESCUE_ABI } from './abi.js';
@@ -75,17 +76,24 @@ async function main() {
 
   // Reads take the lowest-latency transport available; broadcast always fans out to every
   // remote endpoint, because redundancy costs nothing once the bytes are signed.
-  const { client, resolved } = await localFirstClient(transportConfigFromEnv(CHAIN_ID));
+  // Prefer a local node without needing it configured: it is the single biggest latency win,
+  // and its absence should be loud rather than a silent 10x regression.
+  const local = await detectLocalNode(CHAIN_ID);
+  const { client, resolved } = await localFirstClient({
+    ...transportConfigFromEnv(CHAIN_ID),
+    ...(local.found ? { httpUrl: local.httpUrl, wsUrl: local.wsUrl } : {}),
+  });
   const wallet = createWalletClient({ account: guardian, chain, transport: http(urls[0]) });
 
   console.log(`guardian  ${guardian.address}`);
   console.log(`victim    ${victim}`);
   console.log(`reads     ${resolved.description}`);
   console.log(`broadcast ${urls.length} endpoint(s)`);
-  if (resolved.kind === 'http-remote') {
-    console.log(
-      `  NOTE: reads are crossing the network. Running beside a Monad node and setting\n` +
-        `  MONAD_IPC_PATH removes the round-trip that dominates detection latency.`,
+  console.log(`node      ${local.detail}`);
+  if (!local.found) {
+    console.warn(
+      `  WARNING: polling a remote endpoint. Detection latency is bounded by that round-trip,\n` +
+        `  so a local node is worth roughly 10x here. Set MONAD_HTTP_URL or MONAD_IPC_PATH.`,
     );
   }
 
