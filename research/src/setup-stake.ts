@@ -94,6 +94,29 @@ async function main() {
       );
     }
 
+    // Check available stake locally. The precompile reverts with "insufficient stake" and
+    // consumes the whole gas limit doing so, which is an expensive and uninformative way to
+    // discover the number — especially since only ACTIVATED stake counts, so a delegation made
+    // this epoch reads as unavailable.
+    const del = await getDelegator(publicClient, validatorId, account.address);
+    if (del.stake < amount) {
+      const pending: string[] = [];
+      for (let s = 0; s < 8; s++) {
+        const r = await getWithdrawalRequest(publicClient, validatorId, account.address, s);
+        if (r.withdrawalAmount > 0n) {
+          pending.push(`slot ${s}: ${formatEther(r.withdrawalAmount)} MON (claimable at epoch ${maturityEpoch(r.withdrawEpoch)})`);
+        }
+      }
+      throw new Error(
+        `insufficient active stake on validator ${validatorId}: have ${formatEther(del.stake)} MON, ` +
+          `asked for ${formatEther(amount)} MON.\n` +
+          (pending.length
+            ? `  Already pending:\n    ${pending.join('\n    ')}\n` +
+              `  Undelegated stake is no longer available — withdraw it first, or delegate more.`
+            : `  Note only ACTIVATED stake can be undelegated; a delegation made this epoch is not yet active.`),
+      );
+    }
+
     console.log(`undelegating ${formatEther(amount)} MON from validator ${validatorId} into slot ${withdrawId}...`);
     const data = encodeFunctionData({
       abi: STAKING_ABI, functionName: 'undelegate', args: [validatorId, amount, withdrawId],
