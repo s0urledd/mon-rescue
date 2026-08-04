@@ -19,7 +19,7 @@ import { privateKeyToAccount } from 'viem/accounts';
 import {
   chainById, RPC_POOL, publicClientFor, STAKING_PRECOMPILE, STAKING_ABI,
   getEpoch, getDelegator, getWithdrawalRequest, getDelegations,
-  withdrawableAtEpoch, epochsUntilClaimable, STAKING_CONSTANTS,
+  withdrawableAtEpoch, epochsUntilClaimable, maturityEpoch, STAKING_CONSTANTS,
 } from '@monrescue/shared';
 import { requireEnv } from './lib.js';
 
@@ -103,14 +103,32 @@ async function main() {
     console.log(`${hash} -> ${r.status}`);
 
     const after = await getEpoch(publicClient);
-    const predicted = withdrawableAtEpoch(after);
     const actual = await getWithdrawalRequest(publicClient, validatorId, account.address, withdrawId);
-    console.log(`\npredicted unlock epoch: ${predicted}`);
-    console.log(`on-chain withdrawEpoch:  ${actual.withdrawEpoch}`);
-    if (predicted !== actual.withdrawEpoch) {
+
+    // Compare like with like. withdrawEpoch is the ACTIVATION epoch (n+1, or n+2 past the
+    // boundary block); maturity is one WITHDRAWAL_DELAY beyond it. An earlier version compared
+    // a maturity prediction against the activation field and reported every correct run as a
+    // mismatch.
+    const predictedActivation = after.epoch + (after.inEpochDelayPeriod ? 2n : 1n);
+    const predictedMaturity = withdrawableAtEpoch(after);
+
+    console.log(`\nactivation epoch:  predicted ${predictedActivation}, on-chain ${actual.withdrawEpoch}` +
+      `${predictedActivation === actual.withdrawEpoch ? '  (match)' : '  !! MISMATCH'}`);
+    console.log(`claimable at epoch: ${maturityEpoch(actual.withdrawEpoch)}` +
+      `${maturityEpoch(actual.withdrawEpoch) === predictedMaturity ? '  (match)' : '  !! MISMATCH'}`);
+
+    if (predictedActivation !== actual.withdrawEpoch) {
       console.log(
-        `NOTE: prediction and on-chain value differ. The reference is ambiguous about which ` +
-          `epoch withdrawEpoch records — record this in FINDINGS.md, the on-chain value wins.`,
+        `\nNOTE: activation differs from the prediction. The on-chain value is authoritative — ` +
+          `record it in FINDINGS.md and check maturityEpoch().`,
+      );
+    }
+
+    // The dust sweep can silently enlarge the request past what was requested.
+    if (actual.withdrawalAmount !== amount) {
+      console.log(
+        `\nNOTE: recorded ${formatEther(actual.withdrawalAmount)} MON, requested ${formatEther(amount)} — ` +
+          `the precompile folds a sub-1-gwei remainder into the withdrawal.`,
       );
     }
     console.log(`\nRun ACTION=status periodically; when it says CLAIMABLE NOW, run script:b.`);

@@ -625,6 +625,34 @@ they are most expensive.
 
 ## Q11 — Precompile edge cases that the documentation gets wrong
 
+### `withdrawEpoch` semantics — CONFIRMED on testnet 2026-08-04
+
+Two undelegates from `0xa5d75b…86B3`, both fired in **epoch 1017 before the boundary block**:
+
+| | |
+|---|---|
+| tx | `0x51e00cc3…` (slot 0), `0x9688a803…` (slot 1) |
+| epoch at submission | 1017, `inEpochDelayPeriod = false` |
+| on-chain `withdrawEpoch` | **1018** |
+
+`withdrawEpoch` = `n+1` = the **activation** epoch, exactly as the struct comment says
+("epoch when undelegate stake deactivates") and **not** the current epoch as the `undelegate`
+pseudocode claims. The pseudocode is wrong.
+
+So `maturityEpoch(withdrawEpoch) = withdrawEpoch + WITHDRAWAL_DELAY` is correct, and these
+positions become claimable at **epoch 1019**.
+
+**A false alarm worth recording.** The run printed "prediction and on-chain value differ" on
+both legs. That was a defect in `setup-stake.ts`, not a finding: it compared
+`withdrawableAtEpoch()` — which returns *maturity* (1019) — against `withdrawEpoch`, which
+holds *activation* (1018). Two different quantities, so every correct run looked like a
+mismatch. Both numbers actually agreed on maturity 1019, which confirms the model rather than
+contradicting it. Fixed to compare activation against activation and print maturity separately.
+
+Still open: the boundary contrast. Both legs landed before the boundary block, so `n+2`
+activation is predicted but unmeasured. A third undelegate fired after block 50,850,000 (while
+`inEpochDelayPeriod` is true) would close it.
+
 Reading the upstream implementation alongside the docs surfaced several places where the
 documentation is incomplete or actively wrong. Each of these was a live or latent bug here.
 
