@@ -453,6 +453,46 @@ Two further constraints that bite the hot path specifically:
 
 ---
 
+## Q13 — What multi-endpoint broadcast actually buys
+
+Worth recording because I got this wrong twice, in opposite directions.
+
+**Documented, verbatim:**
+
+- *"Since the function is deterministic, everyone arrives at the same leader schedule."*
+- *"the consensus process forwards the transaction to `N` upcoming leader validator nodes.
+  Currently, `N` is set to 3 in Monad testnet and mainnet."*
+- *"**The owner node** of the transaction monitors for that transaction in subsequent blocks. If
+  it doesn't see the transaction in the next `N` blocks, it will re-send to the next `N` leaders.
+  It repeats this behavior for a total of `K` times. Currently, `K` is set to 3."*
+
+**First claim (wrong):** fanning out reaches more leaders. Overstated — the schedule is shared,
+so no endpoint knows a leader another does not.
+
+**Second claim (also wrong):** therefore fan-out buys nothing but failover. That missed the third
+quote. The retry cycle belongs to **the owner node**, so every endpoint submitted to becomes an
+independent owner running its own `K=3` cycle of re-forwarding. Across the retry window that is
+genuinely broader forwarding, reaching leaders further down the schedule — three owners means up
+to three independent retry cycles rather than one.
+
+**What actually holds:**
+
+| | |
+|---|---|
+| At the first submission, nodes in sync | same three leaders — no coverage gain |
+| Across the retry window | real gain: independent `K=3` cycles per owner node |
+| If any node is out of round-sync | partially different leader set (see below) |
+| If our node is down or throttled | fan-out is the only thing that saves the rescue |
+
+**UNVERIFIED:** that all nodes compute the same "next `N`" at the same instant. The docs never
+say this. Which leaders are *next* depends on the round a node currently believes is current, and
+rounds advance on timeout whether or not a block is produced — so a lagging node forwards to a
+partially different set. This is inference, and it is the kind that should be measured rather
+than argued about: submit the same transaction to several endpoints and compare which leaders it
+reaches.
+
+---
+
 ## Q12 — Epoch-transition mechanics (two exploitable details)
 
 ### The flip block is targetable — the epoch changes in transaction 0

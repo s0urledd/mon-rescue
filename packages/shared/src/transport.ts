@@ -16,17 +16,34 @@ import { chainById, RPC_POOL } from './chains.js';
  *   3. HTTP to localhost — still no network, pays HTTP framing per call
  *   4. Remote HTTPS — failover only
  *
- * **Why we still broadcast to several endpoints — and what that does NOT buy.**
+ * **Why we still broadcast to several endpoints.**
  *
- * It does not reach more leaders. An RPC node forwards a transaction to the next `N = 3`
- * upcoming leaders, and the leader schedule is deterministic and identical on every node, so
- * every endpoint forwards to the *same* three. Submitting to five nodes does not widen leader
- * coverage, and an earlier version of this comment claimed it did.
+ * Three things are documented, and the distinction between them matters:
  *
- * What it actually buys is failover: our node being down, lagging, restarting or rate-limiting
- * at the unlock block is the failure that silently loses the rescue, and it is not detectable
- * from inside the process quickly enough to react. Fanning out costs nothing once the bytes are
- * signed, so it is worth doing purely as insurance — but it is insurance, not an edge.
+ *  - "Since the function is deterministic, everyone arrives at the same leader schedule." The
+ *    schedule itself is shared, so no node knows a leader the others do not.
+ *  - "the consensus process forwards the transaction to `N` upcoming leader validator nodes.
+ *    Currently, `N` is set to 3."
+ *  - "**The owner node** of the transaction monitors for that transaction in subsequent blocks.
+ *    If it doesn't see the transaction in the next `N` blocks, it will re-send to the next `N`
+ *    leaders. It repeats this behavior for a total of `K` times. Currently, `K` is set to 3."
+ *
+ * That third point is the one that matters, and an earlier version of this comment missed it.
+ * The retry cycle belongs to **the owner node** — the node the transaction was submitted to. So
+ * every endpoint we submit to becomes an independent owner running its own K=3 cycle of
+ * re-forwarding. Across the retry window that is genuinely more forwarding, reaching leaders
+ * further down the schedule, not merely the same three repeatedly.
+ *
+ * At a single instant with nodes in sync, they do all forward to the same three, so there is no
+ * coverage gain from the first submission alone. But "in sync" is an assumption: which leaders
+ * are *next* depends on the round each node currently believes is current, and rounds advance on
+ * timeout whether or not a block is produced. A node even slightly behind forwards to a
+ * partially different set. **The docs never state that all nodes compute the same next-N at the
+ * same moment — that is inference, not documentation.**
+ *
+ * And underneath all of it, the plain failover case: our node being down, lagging, restarting or
+ * rate-limiting at the unlock block silently loses the rescue, and is not detectable from inside
+ * the process fast enough to react.
  */
 
 export interface TransportConfig {
