@@ -24,9 +24,32 @@ pnpm --filter @monrescue/shared build
 
 ```bash
 cp .env.example .env
+pnpm --filter @monrescue/research genkeys   # prints a ready-to-paste block
 ```
 
-Fill in four keys/addresses. Every script loads this file automatically — repo-root first, then
+`genkeys` generates the four test identities and explains each one inline. Paste its output
+into `.env`.
+
+### The four addresses
+
+| | Role | What it is | Needs a private key? | Funding |
+|---|---|---|---|---|
+| 1 | **Victim** (`RESEARCH_PRIVATE_KEY`) | The compromised wallet. It holds the stake. In the battle test the adversary signs with this *same* key — "the attacker has the seed" means exactly that, so victim and attacker are one identity. | yes | stake + gas for the adversary legs |
+| 2 | **Guardian** (`GUARDIAN_PRIVATE_KEY`) | Pays all gas and broadcasts the rescue. Chooses nothing — the destination is immutable in the contract, so even a stolen guardian key cannot redirect funds. | yes | **> 10 MON** |
+| 3 | **Safe address** (`SAFE_ADDRESS`) | The only place rescued funds can ever go, burned into the contract at construction and unchangeable. No script here ever uses its key. | no — address only | none |
+| 4 | **Attacker sink** (`ATTACKER_SINK`) | Where the simulated attacker tries to send. Test-only; it is how you tell who won. | no — address only | none |
+
+Two constraints that matter:
+
+- **Guardian above 10 MON.** Monad caps an account's total gas across its inflight transactions
+  at `min(10 MON, lagged balance)` over 3 blocks, so a thin guardian is throttled at exactly the
+  moment it needs to retry.
+- **Safe address must be a plain EOA**, and in the real flow a key that has never touched the
+  compromised machine. The sweep is a native transfer, so a contract without a payable receive
+  would make it fail.
+
+In production only #2 and #3 exist as our concern: the victim is the user (who signs in their
+own wallet and never shares a key), and there is no attacker sink. Every script loads this file automatically — repo-root first, then
 any package-local `.env`, and real environment variables always win.
 
 Get testnet MON from https://faucet.monad.xyz for the victim and the guardian.

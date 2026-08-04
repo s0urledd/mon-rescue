@@ -18,7 +18,8 @@
     "stake": "tsx src/setup-stake.ts",
     "make-window": "tsx src/make-window.ts",
     "adversary": "tsx src/adversary.ts",
-    "boundary": "tsx src/boundary-experiment.ts"
+    "boundary": "tsx src/boundary-experiment.ts",
+    "genkeys": "tsx src/genkeys.ts"
   },
   "dependencies": {
     "@monrescue/shared": "workspace:*",
