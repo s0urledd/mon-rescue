@@ -1,10 +1,11 @@
 # MonRescue — Phase 0 Findings
 
-**Status:** Phase 0 partially resolved. Two questions are answered conclusively and one of
-them is **negative**, which changes the architecture. The blocking question (Q1) is
-documented-yes / **empirically UNVERIFIED** and needs a funded testnet key to close.
+**Status:** Q5 answered conclusively (and negatively, which set the architecture). **Q2 now
+VERIFIED on testnet** — viem submits a working `0x04` and the delegation is live. Q3 partially
+resolved by measurement. The blocking question (Q1) is documented-yes /
+**empirically UNVERIFIED** and still needs a funded run.
 
-**Date:** 2026-08-03
+**Date:** 2026-08-03, updated 2026-08-04 with the first on-chain results
 **Networks probed:** Monad testnet (chainId `10143`), Monad mainnet (chainId `143`)
 **Method:** live JSON-RPC against three independent endpoints, cross-checked against
 `docs.monad.xyz` and against an independent validator API.
@@ -133,7 +134,31 @@ executed):
 | 100 MON | 1000 MON | 10 | **1090 MON** | 10 MON |
 | 3 MON | 0 | 3 | 0 | 3 MON |
 
-### UNRESOLVED: the documentation contradicts itself, and it matters
+### PARTIALLY RESOLVED — measured on testnet
+
+Script A produced evidence without being designed to. At block **50,823,513**
+(tx `0x3aa6a9f3a4a84fa260e879f1c48760321de3a10d1c2bf2d7444ad492ef847371`):
+
+| | |
+|---|---|
+| account delegated at transaction end | yes (`0xef0100147bc559…`) |
+| balance | 4.920652 → 4.915916 MON — **decreased** |
+| ended below 10 MON | **yes** |
+| transaction status | **success** |
+
+So a delegated account decremented its balance and ended below 10 MON, and the transaction did
+**not** revert. **The strict reading — "transactions that would reduce its balance to below
+10 MON will unconditionally revert" — does not hold as written.**
+
+This is consistent with the reserve-balance page's sender clause: *"For the sender, the ending
+balance may be lower by at most the transaction's gas spend."*
+
+**What this does NOT settle.** It is the sender-pays-gas case only. The sweep is a *value*
+transfer out of a delegated account, which the same page treats separately, and the floor for
+that — `min(balance at start, 10 MON)` versus a flat 10 MON — is still open. Script C is still
+required, and `reserveFloor()` remains unvalidated for the case we actually depend on.
+
+### The documentation contradicts itself, and the rest still matters
 
 Two statements in the docs cannot both be true for a delegated EOA:
 
@@ -925,7 +950,7 @@ phase — not answered here.
 | Question | Verdict | Blocking? |
 |---|---|---|
 | Q1 atomic claim+transfer in one 7702 batch | Documented-yes, **UNVERIFIED** | **YES — needs funded testnet key** |
-| Q2 7702 / `0x04` submission via viem | Documented-yes, submission UNVERIFIED | Closed by Script A |
+| Q2 7702 / `0x04` submission via viem | **VERIFIED on testnet** — tx `0x3aa6a9f3…`, code became `0xef0100147bc559…` exactly as expected | Closed |
 | Q3 reserve rule | **RESOLVED** (floor = `min(start, 10 MON)`) | No |
 | Q4 guardian-triggered destination-locked sweep | Design resolved, on-chain UNVERIFIED | Closed by Script D |
 | Q5 recipient binding | **RESOLVED — NO** | No (architecture updated) |
