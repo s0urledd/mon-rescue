@@ -89,10 +89,29 @@ async function main() {
   });
 
   console.log('submitting type-0x04 transaction (authorization + rescue in one tx)...');
+  // Set the gas limit explicitly rather than letting viem estimate. Monad charges the LIMIT,
+  // not the usage, with no refunds, so an inflated estimate is money burned — and on a
+  // near-empty test account it is the difference between running and failing to fund the
+  // transaction at all.
+  const gas = BigInt(process.env.GAS_LIMIT ?? 600_000);
+  const fees = await publicClient.estimateFeesPerGas();
+  const maxFeePerGas = fees.maxFeePerGas ?? 100_000_000_000n;
+  const cost = gas * maxFeePerGas;
+  const balance = await publicClient.getBalance({ address: account.address });
+  console.log(`gas ${gas} x ${formatEther(maxFeePerGas)} MON = up to ${formatEther(cost)} MON`);
+  if (balance < cost) {
+    throw new Error(
+      `EOA holds ${formatEther(balance)} MON but the transaction can cost up to ` +
+        `${formatEther(cost)} MON (the gas LIMIT is charged, not the usage). Top it up, or ` +
+        `lower GAS_LIMIT if you know the call fits.`,
+    );
+  }
+
   const hash = await wallet.sendTransaction({
     authorizationList: [authorization],
     to: account.address, // call into ourselves; the delegated code executes
     data,
+    gas,
   });
   console.log(`tx: ${hash}`);
 
