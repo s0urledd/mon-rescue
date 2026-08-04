@@ -134,7 +134,41 @@ executed):
 | 100 MON | 1000 MON | 10 | **1090 MON** | 10 MON |
 | 3 MON | 0 | 3 | 0 | 3 MON |
 
-### PARTIALLY RESOLVED — measured on testnet
+### RESOLVED — measured on testnet 2026-08-04, and the "contradiction" was largely illusory
+
+`script:c` ran against a delegated account holding 4.8633 MON:
+
+| case | test | result |
+|---|---|---|
+| 1 | transfer 0.5 MON, ending below the floor | **reverted**, as predicted |
+| 2 | transfer to land exactly on the floor | skipped — floor equalled the balance, nothing above it |
+| 3 | undelegate, wait `k=3` quiet blocks, then empty 4.8064 MON | **success** |
+
+Case 1 confirms the floor is real and enforced. Case 3 confirms the de-delegation escape works
+exactly as documented.
+
+**The two readings are equivalent.** Enumerating every `(start, end)` pair from 0–30 MON, the
+permissive rule (`end >= min(start, 10)`) and the strict rule ("reverts if it decrements *and*
+ends below 10") **disagree on zero of 961 cases**. They are the same rule. The apparent
+contradiction only appears if you drop the "decrements **and** drops below" qualifier — which
+the reserve-balance page states explicitly and which I quoted but then failed to apply.
+
+So `reserveFloor()` was correct all along, and Q3 was never the architectural fork it was
+written up as. Worth recording as a caution: two documentation passages saying the same thing in
+different words read as a contradiction when one of them is paraphrased.
+
+### What this means for the rescue
+
+| victim start balance | inflow | floor | sweepable | stranded |
+|---|---|---|---|---|
+| 4.86 MON (this test account) | 500 MON | 4.86 | **500 MON** | 4.86 MON |
+| 0 (a drained wallet — the real case) | 500 MON | 0 | **500 MON** | 0 |
+
+The floor only ever strands what was *already* there. **Everything the claim brings in is
+sweepable**, which is the case that matters: a compromised wallet has usually been emptied of
+liquid MON already, so its floor is near zero.
+
+### Superseded: the earlier partial finding
 
 Script A produced evidence without being designed to. At block **50,823,513**
 (tx `0x3aa6a9f3a4a84fa260e879f1c48760321de3a10d1c2bf2d7444ad492ef847371`):
