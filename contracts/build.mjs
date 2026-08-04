@@ -17,7 +17,19 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-const solc = require('solc');
+let solc;
+try {
+  solc = require('solc');
+} catch {
+  console.error(
+    `solc is not installed.\n\n` +
+      `  pnpm install        # from the repo root — solc is a root devDependency\n\n` +
+      `If that has already been run, check you are on a recent commit: solc moved from a\n` +
+      `contracts-local npm install to the workspace root, because contracts/ has no\n` +
+      `package.json and npm cannot resolve the workspace:* protocol there.`,
+  );
+  process.exit(1);
+}
 const source = readFileSync(join(HERE, 'src', 'MonRescue.sol'), 'utf8');
 
 const input = {
