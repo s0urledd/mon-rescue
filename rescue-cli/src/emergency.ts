@@ -192,7 +192,19 @@ async function main() {
     return;
   }
 
-  const window = JSON.parse(readFileSync(windowFile, 'utf8')) as AuthorizationWindow;
+  let window: AuthorizationWindow;
+  try {
+    window = JSON.parse(readFileSync(windowFile, 'utf8')) as AuthorizationWindow;
+  } catch (e) {
+    // Triage above this point is already useful, so a missing window must not discard it.
+    // AUTH_WINDOW_FILE is set in .env by default, which means the natural first run lands here.
+    const missing = (e as NodeJS.ErrnoException).code === 'ENOENT';
+    console.log(`\n${missing ? `No authorization window at ${windowFile} yet.` : `Could not read ${windowFile}: ${(e as Error).message}`}`);
+    console.log(`Triage above is complete. To arm, create the window first:`);
+    console.log(`\n  pnpm --filter @monrescue/research make-window\n`);
+    console.log(`Or unset AUTH_WINDOW_FILE to run triage only.`);
+    return;
+  }
   const rescueContract = getAddress(window.contractAddress);
 
   // Refuse a window that does not match this chain or this contract, and refuse chainId 0
