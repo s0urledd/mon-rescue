@@ -1,11 +1,14 @@
 # MonRescue — Phase 0 Findings
 
-**Status:** Q5 answered conclusively (and negatively, which set the architecture). **Q2 now
-VERIFIED on testnet** — viem submits a working `0x04` and the delegation is live. Q3 partially
-resolved by measurement. The blocking question (Q1) is documented-yes /
-**empirically UNVERIFIED** and still needs a funded run.
+**Status: Q1 IS ANSWERED — YES.** On 2026-08-06 a single EIP-7702 transaction claimed three
+matured withdrawals from the staking precompile and swept 500.112413 MON to the destination-
+locked safe address, in one block, fired by a guardian key that never held the victim's key.
+The blocking assumption the whole design rested on is now measured rather than argued.
 
-**Date:** 2026-08-03, updated 2026-08-04 with the first on-chain results
+Q2 verified, Q3 resolved, Q5 answered (negatively, which set the architecture), `withdrawEpoch`
+semantics confirmed. Q4 is closed as a side effect of the Q1 run: the guardian fired it.
+
+**Date:** 2026-08-03, updated through 2026-08-06 with on-chain results
 **Networks probed:** Monad testnet (chainId `10143`), Monad mainnet (chainId `143`)
 **Method:** live JSON-RPC against three independent endpoints, cross-checked against
 `docs.monad.xyz` and against an independent validator API.
@@ -67,7 +70,44 @@ about. Q1 is no longer merely the gate on a nice-to-have; it is the only remaini
 
 ## Q1 (BLOCKING) — Can the staking claim and a native transfer execute atomically in one 7702 batch?
 
-### VERDICT: **Documented-yes, empirically UNVERIFIED.** Needs a funded testnet run.
+### VERDICT: **YES — measured on testnet, 2026-08-06.**
+
+Transaction `0x6c285d49425cd829bb74dc784818fcbd0279a8fcb4fa0736c98460d2b313e17b`, block
+**51,416,783**:
+
+| | |
+|---|---|
+| sender | the guardian — never held the victim's key |
+| target | the victim EOA, delegated to the rescue contract |
+| `Withdraw` events from `0x…1000` | **3** |
+| safe address | 4.806452 → 504.918865 MON |
+| delivered | **500.112413 MON, in a single block** |
+| victim retained | 5.043105 MON — exactly the reserve floor |
+| status | success |
+
+Three matured withdrawals were claimed from the staking precompile and the proceeds swept to
+the destination-locked address **with no intervening block**. There is no window in which the
+claimed MON sits in a wallet the attacker controls. That was the one thing the architecture
+could not survive being wrong about.
+
+The delivered amount exceeds the 500 MON of principal by 0.112413 MON: rewards accrued to the
+withdrawal requests themselves, which `withdraw()` pays regardless — consistent with Q11.
+
+**Q4 closed with it.** The transaction was sent by the guardian, whose key cannot choose a
+destination, against a contract whose `SAFE_ADDRESS` is immutable. A separate guardian firing a
+destination-locked sweep is no longer a design claim.
+
+### One thing this does NOT establish
+
+`gasUsed` reads **350,000 of a 350,000 limit** — exactly the limit, as it also did on the run
+that ran out of gas. Monad charges the limit rather than the usage, so the receipt reports what
+was charged, not what was consumed. **We cannot see how much headroom this transaction had.**
+
+So the success at 350k is one data point, not evidence that 350k is generally sufficient — and
+the same limit failed on the previous attempt against the same three positions. Until actual
+consumption can be measured some other way, `estimateRescueGas()` and its ~970k for three
+positions remains the safer default, and the earlier finding stands: being short is fatal
+because the precompile consumes all gas, while being long only costs the difference.
 
 What the documentation supports:
 
