@@ -23,6 +23,7 @@ import {
   watchGuardianBalance, GUARDIAN_INFLIGHT_FLOOR,
 } from './preflight.js';
 import { selectAuthorizations, validateWindow, assessWindow, type AuthorizationWindow } from './authorization.js';
+import { isAbsolute, resolve } from 'node:path';
 
 /**
  * The rescue hot path.
@@ -54,6 +55,19 @@ const SPRAY_MAX_IN_FLIGHT = Number(process.env.SPRAY_MAX_IN_FLIGHT ?? 4);
 const SLOTS_TO_PROBE = Number(process.env.SLOTS_TO_PROBE ?? 32);
 /** Authorizations carried per attempt. Each costs ~25k gas; all name the same contract. */
 const AUTHS_PER_ATTEMPT = Number(process.env.AUTHS_PER_ATTEMPT ?? 6);
+
+/**
+ * Resolve a configured path against the repo root rather than the process cwd.
+ *
+ * `pnpm --filter <pkg> <script>` runs with the cwd set to that package's directory, so a
+ * relative path like `./window.json` means a different file depending on which package wrote
+ * it and which one reads it. make-window (cwd research/) and arm (cwd rescue-cli/) disagreed
+ * about the same configured value, which is not something a user can be expected to debug.
+ */
+function resolveFromRepoRoot(p: string): string {
+  if (isAbsolute(p)) return p;
+  return resolve(new URL('../../', import.meta.url).pathname, p);
+}
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -225,7 +239,18 @@ async function main() {
   // --- authorization window (optional, for re-asserting delegation) -------
   let window: AuthorizationWindow | undefined;
   if (process.env.AUTH_WINDOW_FILE) {
-    window = JSON.parse(readFileSync(process.env.AUTH_WINDOW_FILE, 'utf8')) as AuthorizationWindow;
+    const path = resolveFromRepoRoot(process.env.AUTH_WINDOW_FILE);
+    try {
+      window = JSON.parse(readFileSync(path, 'utf8')) as AuthorizationWindow;
+    } catch (e) {
+      // The window is optional here — arm already warns and continues without one. Dying on a
+      // missing file would refuse a rescue we can still make, just without the ability to
+      // re-assert delegation if the attacker moves first.
+      console.warn(`\ncould not read ${path}: ${(e as Error).message.split('\n')[0]}`);
+      console.warn(`  continuing without it. Create one with: pnpm --filter @monrescue/research make-window`);
+    }
+  }
+  if (window) {
     validateWindow(window, CHAIN_ID, rescueContract);
     const victimNonce = await client.getTransactionCount({ address: victim });
     console.log(`\nauthorization window: ${assessWindow(window, victimNonce).message}`);

@@ -27,6 +27,7 @@ import { MONRESCUE_ABI } from './abi.js';
 import { validateWindow, assessWindow, type AuthorizationWindow } from './authorization.js';
 import { delegationTarget } from './guard.js';
 import { preflight, gasBudgetFromEnv, DEFAULT_RESCUE_GAS_LIMIT } from './preflight.js';
+import { isAbsolute, resolve } from 'node:path';
 
 const CHAIN_ID = Number(process.env.CHAIN_ID ?? 143);
 
@@ -37,6 +38,19 @@ function requireEnv(key: string): string {
   const v = process.env[key];
   if (!v) throw new Error(`missing ${key}`);
   return v;
+}
+
+/**
+ * Resolve a configured path against the repo root rather than the process cwd.
+ *
+ * `pnpm --filter <pkg> <script>` runs with the cwd set to that package's directory, so a
+ * relative path like `./window.json` means a different file depending on which package wrote
+ * it and which one reads it. make-window (cwd research/) and arm (cwd rescue-cli/) disagreed
+ * about the same configured value, which is not something a user can be expected to debug.
+ */
+function resolveFromRepoRoot(p: string): string {
+  if (isAbsolute(p)) return p;
+  return resolve(new URL('../../', import.meta.url).pathname, p);
 }
 
 export interface Position {
@@ -194,7 +208,7 @@ async function main() {
 
   let window: AuthorizationWindow;
   try {
-    window = JSON.parse(readFileSync(windowFile, 'utf8')) as AuthorizationWindow;
+    window = JSON.parse(readFileSync(resolveFromRepoRoot(windowFile), 'utf8')) as AuthorizationWindow;
   } catch (e) {
     // Triage above this point is already useful, so a missing window must not discard it.
     // AUTH_WINDOW_FILE is set in .env by default, which means the natural first run lands here.

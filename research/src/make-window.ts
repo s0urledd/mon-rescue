@@ -18,10 +18,24 @@ import { privateKeyToAccount } from 'viem/accounts';
 import { writeFileSync } from 'node:fs';
 import { chainById, RPC_POOL, publicClientFor, STAKING_PRECOMPILE, RESERVE_PRECOMPILE } from '@monrescue/shared';
 import { requireEnv } from './lib.js';
+import { isAbsolute, resolve } from 'node:path';
 
 const CHAIN_ID = Number(process.env.CHAIN_ID ?? 10143);
 const WINDOW_SIZE = Number(process.env.AUTH_WINDOW_SIZE ?? 64);
 const OUT = process.env.AUTH_WINDOW_FILE ?? './window.json';
+
+/**
+ * Resolve a configured path against the repo root rather than the process cwd.
+ *
+ * `pnpm --filter <pkg> <script>` runs with the cwd set to that package's directory, so a
+ * relative path like `./window.json` means a different file depending on which package wrote
+ * it and which one reads it. make-window (cwd research/) and arm (cwd rescue-cli/) disagreed
+ * about the same configured value, which is not something a user can be expected to debug.
+ */
+function resolveFromRepoRoot(p: string): string {
+  if (isAbsolute(p)) return p;
+  return resolve(new URL('../../', import.meta.url).pathname, p);
+}
 
 async function main() {
   const pk = requireEnv('RESEARCH_PRIVATE_KEY') as `0x${string}`;
@@ -71,10 +85,10 @@ async function main() {
   };
 
   writeFileSync(
-    OUT,
+    resolveFromRepoRoot(OUT),
     JSON.stringify(window, (_k, v) => (typeof v === 'bigint' ? Number(v) : v), 2) + '\n',
   );
-  console.log(`\nwrote ${OUT}`);
+  console.log(`\nwrote ${resolveFromRepoRoot(OUT)}`);
   console.log(`This file is a live capability over the account's delegation. It can only ever`);
   console.log(`point at the destination-locked rescue contract, so a leak is nonce griefing,`);
   console.log(`not fund loss — but do not commit it.`);
