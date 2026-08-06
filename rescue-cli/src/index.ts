@@ -349,6 +349,29 @@ async function main() {
   const isDone = makeSafeBalanceChecker(client, safeAddress, safeBaseline, 1n);
   console.log(`safe baseline ${formatEther(safeBaseline)} MON`);
 
+  /**
+   * Is there still anything to rescue?
+   *
+   * The only honest reason to stop trying is that the withdrawal requests no longer exist —
+   * someone claimed them, and since the safe address did not grow, that someone was the
+   * attacker. While any slot still holds a request the money is still claimable and stopping
+   * would be a decision to lose it.
+   *
+   * A failed read returns false: not knowing is not evidence that the position is gone, and the
+   * cost of one more attempt is gas while the cost of quitting early is the position.
+   */
+  const positionsGone = async (): Promise<boolean> => {
+    try {
+      for (const p of batch) {
+        const r = await getWithdrawalRequest(client, p.validatorId, victim, p.withdrawId);
+        if (!isEmptySlot(r.withdrawalAmount, r.withdrawEpoch)) return false;
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   const finish = async (why: string) => {
     stopGuard(); stopBalance();
     const final = await client.getBalance({ address: safeAddress });
@@ -358,6 +381,10 @@ async function main() {
   };
 
   // --- wait, then burst ---------------------------------------------------
+  // The pre-signed attempts are single-use: each carries a fixed nonce, so once the burst has
+  // walked the ladder they are spent and re-broadcasting them only costs round-trips at the
+  // moment round-trips matter most. After that, retries sign fresh at the current nonce.
+  let presignedSpent = false;
   console.log(`\narmed. waiting for epoch ${targetEpoch}...`);
   for (;;) {
     if (await isDone()) return finish('safe address balance increased — rescue landed.');
@@ -410,31 +437,47 @@ async function main() {
     // of, so one well-priced attempt now is exactly right and queueing would burn gas for
     // nothing.
     const sprayMode = process.env.SPRAY_MODE ?? (a.phase === 'due' ? 'off' : 'window');
-    if (sprayMode === 'off') {
-      console.log(`firing a single attempt (SPRAY_MODE=off — reacting, not pre-queueing)`);
-      const single = attempts[0]!;
-      const t0 = Date.now();
-      const r = await broadcastEverywhere(CHAIN_ID, single.raw, urls);
-      console.log(`  nonce=${single.nonce} ${r.hash ?? 'REJECTED'} (${Date.now() - t0}ms)`);
-      if (r.hash) {
-        const receipt = await client.waitForTransactionReceipt({ hash: r.hash });
-        console.log(`  receipt ${receipt.status} in block ${receipt.blockNumber}`);
-        if (receipt.status === 'success') return finish('rescue landed.');
+    // Skip the pre-signed set entirely once it has been walked — every nonce in it is consumed,
+    // so replaying it costs one rejected round-trip per rung against every endpoint, at the one
+    // moment when round-trips are the scarce resource.
+    if (!presignedSpent) {
+      if (sprayMode === 'off') {
+        console.log(`firing a single attempt (SPRAY_MODE=off — reacting, not pre-queueing)`);
+        const single = attempts[0]!;
+        const t0 = Date.now();
+        const r = await broadcastEverywhere(CHAIN_ID, single.raw, urls);
+        console.log(`  nonce=${single.nonce} ${r.hash ?? 'REJECTED'} (${Date.now() - t0}ms)`);
+        if (r.hash) {
+          const receipt = await client.waitForTransactionReceipt({ hash: r.hash });
+          console.log(`  receipt ${receipt.status} in block ${receipt.blockNumber}`);
+          if (receipt.status === 'success') return finish('rescue landed.');
+        }
+        console.log(`single attempt did not land — escalating through the ladder`);
       }
-      console.log(`single attempt did not land — escalating through the ladder`);
+      const result = await spray({
+        chainId: CHAIN_ID, client, attempts: sprayMode === 'off' ? attempts.slice(1) : attempts, urls,
+        intervalMs: Math.round(SPRAY_BLOCKS_PER_ATTEMPT * SECONDS_PER_BLOCK * 1000),
+        maxInFlight: Math.max(1, Math.min(SPRAY_MAX_IN_FLIGHT, inflightCap)),
+        inflightWindowMs: Math.round(3 * SECONDS_PER_BLOCK * 1000),
+        onAttempt: (nonce, hash, ms) =>
+          console.log(`  nonce=${nonce} ${hash ?? 'REJECTED'} (${ms}ms)`),
+        isDone,
+      });
+      console.log(`spray: ${result.attemptsSent} attempt(s), succeeded=${result.succeeded}`);
+      if (result.succeeded) return finish('rescue landed.');
+      presignedSpent = true;
     }
-    const result = await spray({
-      chainId: CHAIN_ID, client, attempts, urls,
-      intervalMs: Math.round(SPRAY_BLOCKS_PER_ATTEMPT * SECONDS_PER_BLOCK * 1000),
-      maxInFlight: Math.max(1, Math.min(SPRAY_MAX_IN_FLIGHT, inflightCap)),
-      onAttempt: (nonce, hash, ms) =>
-        console.log(`  nonce=${nonce} ${hash ?? 'REJECTED'} (${ms}ms)`),
-      isDone,
-    });
-    console.log(`spray: ${result.attemptsSent} attempt(s), succeeded=${result.succeeded}`);
-    if (result.succeeded) return finish('rescue landed.');
 
     // Backstop: the spray is exhausted but the epoch has arrived, so sign fresh and fire.
+    //
+    // A reverted backstop used to end the process. That was wrong, and it is the same mistake
+    // as the 350k gas limit and the frugal spray default: it treats one failure as a verdict on
+    // a path where giving up early loses the whole position. `rescue()` deliberately does not
+    // abort when withdrawals fail — it sweeps regardless — so a revert means the sweep itself
+    // found nothing, which is either "the attacker already took it" (over) or "it has not
+    // arrived yet" (very much not over). Only the first justifies stopping, and it is
+    // distinguishable on-chain: if any slot in the batch still holds a withdrawal request, the
+    // money is still there to be claimed.
     if (isClaimable(epoch, targetEpoch - 1n) || epoch.epoch >= targetEpoch) {
       const nonce = await client.getTransactionCount({ address: guardian.address });
       const raw = await wallet.signTransaction({
@@ -446,7 +489,16 @@ async function main() {
       if (r.hash) {
         const receipt = await client.waitForTransactionReceipt({ hash: r.hash });
         console.log(`receipt ${receipt.status} in block ${receipt.blockNumber}`);
-        return finish(receipt.status === 'success' ? 'backstop landed.' : 'backstop reverted.');
+        if (receipt.status === 'success') return finish('backstop landed.');
+
+        if (await positionsGone()) {
+          return finish('backstop reverted and every slot is empty — the funds left without us.');
+        }
+        const affordable = (await client.getBalance({ address: guardian.address })) > gas * maxFeePerGas;
+        if (!affordable) {
+          return finish('backstop reverted and the guardian cannot afford another attempt — top it up and re-arm.');
+        }
+        console.log(`backstop reverted but the position is still pending — retrying.`);
       }
     }
     await sleep(a.pollIntervalMs);

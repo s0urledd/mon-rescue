@@ -20,6 +20,7 @@ import {
   chainById, RPC_POOL, publicClientFor, STAKING_PRECOMPILE, STAKING_ABI,
   getEpoch, getDelegator, getWithdrawalRequest, getDelegations,
   withdrawableAtEpoch, epochsUntilClaimable, maturityEpoch, STAKING_CONSTANTS,
+  STAKING_GAS, reserveFloor,
 } from '@monrescue/shared';
 import { requireEnv } from './lib.js';
 
@@ -71,6 +72,43 @@ async function main() {
     if (amount < STAKING_CONSTANTS.DUST_THRESHOLD) {
       throw new Error(`amount below DUST_THRESHOLD (${STAKING_CONSTANTS.DUST_THRESHOLD} wei)`);
     }
+
+    // Check locally that this account can actually part with `amount`. Two separate limits bind,
+    // and neither announces itself: the transaction is included and reverts, consuming the whole
+    // gas limit to tell us a number we already had.
+    //
+    //  1. Plain funds: value + gas must fit in the balance.
+    //  2. The reserve floor, but ONLY if this account is 7702-delegated. A delegated account
+    //     ends the transaction at `min(start, 10 MON)` minus gas spend, so the most it can send
+    //     as value is `balance - reserveFloor(balance)` — which is ZERO for any delegated
+    //     account holding under 10 MON. Our own script:a delegation imposes that floor, so the
+    //     victim account is exactly the one that hits it.
+    const code = await publicClient.getCode({ address: account.address });
+    const delegated = !!code && code.toLowerCase().startsWith('0xef0100');
+    const fees = await publicClient.estimateFeesPerGas();
+    const gasCost = STAKING_GAS.delegate * (fees.maxFeePerGas ?? 200_000_000_000n);
+    const floor = delegated ? reserveFloor(balance) : 0n;
+    const spendable = balance > floor ? balance - floor : 0n;
+
+    if (amount + gasCost > balance || amount > spendable) {
+      throw new Error(
+        `cannot delegate ${formatEther(amount)} MON from ${account.address}.\n` +
+          `  balance:        ${formatEther(balance)} MON\n` +
+          `  gas allowance:  ${formatEther(gasCost)} MON (${STAKING_GAS.delegate} gas)\n` +
+          (delegated
+            ? `  reserve floor:  ${formatEther(floor)} MON — this account is 7702-delegated to ` +
+              `${code!.slice(8)}, so it may not end below min(balance, 10 MON)\n` +
+              `  max delegatable: ${formatEther(spendable > gasCost ? spendable - gasCost : 0n)} MON\n` +
+              (spendable === 0n
+                ? `  A delegated account holding under 10 MON cannot send ANY value. Fund it to ` +
+                  `10 MON + ${formatEther(amount)} + gas, or revoke the 7702 delegation first ` +
+                  `(a delegation to the zero address, as script:c does in its third phase).`
+                : `  Reduce AMOUNT, or fund the account.`)
+            : `  max delegatable: ${formatEther(balance > gasCost ? balance - gasCost : 0n)} MON\n` +
+              `  Reduce AMOUNT, or fund the account.`),
+      );
+    }
+
     console.log(`delegating ${formatEther(amount)} MON to validator ${validatorId}...`);
     const data = encodeFunctionData({ abi: STAKING_ABI, functionName: 'delegate', args: [validatorId] });
     const hash = await wallet.sendTransaction({ to: STAKING_PRECOMPILE, data, value: amount });

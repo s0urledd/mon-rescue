@@ -73,6 +73,7 @@ input is signatures made in their own wallet.
 | `claimRewards()` gas | 155,375 — **70% of per-position cost**, usually not worth it |
 | Sweep to an EOA | ~0 gas |
 | Reserve floor | `min(balance at start, 10 MON)` — strands only what was already there |
+| Value a delegated account may send | `balance − min(balance, 10 MON)` — **zero below 10 MON**, gas only |
 | Mainnet base fee | pinned at the 100 gwei floor |
 | Mainnet tips | p50 **2 gwei**, p90 78, **max observed 1,482** |
 | Detection latency | ~8ms local node, ~116ms remote RPC |
@@ -123,16 +124,24 @@ default trades a small certain cost against a small chance of total loss, take t
 
 ## The other recurring failure class
 
-Four separate failures, all **silent environment assumptions**, none logic errors:
+Five separate failures, all **silent**, none logic errors in the ordinary sense:
 
 - a stale `dist/` that died on import and looked identical to "armed and waiting" for two days
 - a log lookback sized for prompt claims, missing a two-day-old position
 - a relative path resolving differently per package under `pnpm --filter`
 - a budget exceeding the guardian balance, aborting instead of scaling
+- `spray()` backing off with `continue` inside a `for…of`, which **skipped** the attempt instead
+  of delaying it — and since attempts carry consecutive nonces, the first back-off stranded every
+  later rung behind a permanent nonce gap
 
-Every one would have lost funds in a real rescue and none announced itself. `nohup` is not
-supervision. Production needs `systemd` with `Restart=always` and a heartbeat visible from
-**outside** the process — a process that is not running cannot report that it is not running.
+Every one would have lost funds in a real rescue and none announced itself. The last was the
+first caught before it cost anything, by reading the hot path asking *"what does this do when the
+guard fires?"* — the guarded path is where the damage lives, and it is the path no happy-path
+test exercises.
+
+`nohup` is not supervision. Production needs `systemd` with `Restart=always` and a heartbeat
+visible from **outside** the process — a process that is not running cannot report that it is
+not running.
 
 ---
 
@@ -147,6 +156,10 @@ supervision. Production needs `systemd` with `Restart=always` and a heartbeat vi
   off attempts failing *after* maturity.
 - **Battle test not run.** Every rescue so far was uncontested. Winning at an *equal* fee is the
   result that means something; losing at a lower fee is expected.
+- **Giving up is now bounded, not automatic.** A reverted backstop used to exit the process. It
+  now retries while any slot still holds a withdrawal request and the guardian can afford a
+  shot, because `rescue()` sweeps regardless of whether the withdrawals succeed — so a revert
+  means the money has not arrived *yet* at least as often as it means it is gone.
 - **Boundary A/B contrast unmeasured.** `n+1` activation is confirmed; `n+2` is predicted from
   the same rule but never observed.
 - **Same-nonce replacement is undocumented on Monad.** Do not build on it.

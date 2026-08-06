@@ -52,6 +52,11 @@ export interface SprayParams {
    * an unbounded spray throttles itself at exactly the wrong moment.
    */
   maxInFlight: number;
+  /**
+   * How long a broadcast attempt counts against `maxInFlight`. Monad's cap covers the last
+   * 3 blocks, so this defaults to 3 blocks at the measured 0.301s.
+   */
+  inflightWindowMs?: number;
   /** Called with each broadcast result so the caller can log a timeline. */
   onAttempt?: (nonce: number, hash: `0x${string}` | undefined, ms: number) => void;
   /** Returns true once the rescue has demonstrably succeeded, ending the spray. */
@@ -71,30 +76,47 @@ export interface SprayResult {
  * Each attempt carries its own nonce, so an attempt that reverts consumes only that nonce and
  * the next one is unaffected. They are not fee replacements of one another — that is the fee
  * ladder in escalate.ts, which shares ONE nonce so at most one rung can land.
+ *
+ * Consecutive nonces make the back-off path load-bearing in a way it does not look. An earlier
+ * version backed off with `continue` inside a `for…of`, which advances the iterator — so hitting
+ * the inflight cap **skipped** an attempt rather than delaying it. Skipping nonce N while later
+ * sending N+1 leaves a gap, and a transaction behind a nonce gap cannot execute at all. The
+ * back-off meant to protect the window would instead have stranded every remaining rung of the
+ * ladder, silently, at the moment of the flip. Back-off must delay, never discard.
  */
 export async function spray(p: SprayParams): Promise<SprayResult> {
   const timeline: SprayResult['timeline'] = [];
   let sent = 0;
-  let inFlight = 0;
+  // Monad's inflight gas cap counts transactions from the last 3 blocks, so "inflight" decays
+  // with time rather than on receipt. Track send times and expire them on the same window the
+  // chain uses; the previous counter only ever decremented when we backed off, so it drifted
+  // upward and throttled the spray harder the longer it ran.
+  const sentAt: number[] = [];
+  const inflightWindowMs = p.inflightWindowMs ?? 3 * 301;
 
-  for (const attempt of p.attempts) {
+  for (let i = 0; i < p.attempts.length; ) {
     if (await p.isDone()) {
       return { succeeded: true, attemptsSent: sent, timeline };
     }
 
-    if (inFlight >= p.maxInFlight) {
-      // Back off rather than pile on: exceeding the per-account inflight gas budget would
-      // have our own transactions rejected during the window we care most about.
+    const now = Date.now();
+    while (sentAt.length > 0 && now - sentAt[0]! > inflightWindowMs) sentAt.shift();
+
+    if (sentAt.length >= p.maxInFlight) {
+      // Wait rather than pile on: exceeding the per-account inflight gas budget would have our
+      // own transactions rejected during the window we care most about. `i` does not advance —
+      // this attempt is delayed, not dropped.
       await sleep(p.intervalMs);
-      inFlight = Math.max(0, inFlight - 1);
       continue;
     }
 
+    const attempt = p.attempts[i]!;
     const t0 = Date.now();
     const result = await broadcastEverywhere(p.chainId, attempt.raw, p.urls);
     const ms = Date.now() - t0;
     sent++;
-    inFlight++;
+    i++;
+    sentAt.push(t0);
     timeline.push({ nonce: attempt.nonce, ms, hash: result.hash });
     p.onAttempt?.(attempt.nonce, result.hash, ms);
 

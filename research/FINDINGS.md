@@ -227,10 +227,9 @@ So a delegated account decremented its balance and ended below 10 MON, and the t
 This is consistent with the reserve-balance page's sender clause: *"For the sender, the ending
 balance may be lower by at most the transaction's gas spend."*
 
-**What this does NOT settle.** It is the sender-pays-gas case only. The sweep is a *value*
-transfer out of a delegated account, which the same page treats separately, and the floor for
-that — `min(balance at start, 10 MON)` versus a flat 10 MON — is still open. Script C is still
-required, and `reserveFloor()` remains unvalidated for the case we actually depend on.
+**What this did NOT settle at the time.** It is the sender-pays-gas case only. The sweep is a
+*value* transfer out of a delegated account, which the same page treats separately. Script C
+case 1 has since settled it — see RESOLVED above.
 
 ### The documentation contradicts itself, and the rest still matters
 
@@ -244,13 +243,11 @@ Two statements in the docs cannot both be true for a delegated EOA:
   below". Sweeping 1000 MON to 0 both decrements and ends below 10 — so it would revert.
 
 The difference is the whole outcome: **sweep everything, or always strand 10 MON.**
-`packages/shared/src/reserve.ts` implements the permissive reading, and **that choice is not
-yet validated.** Script C exists specifically to settle it, and until it runs this is
-**UNVERIFIED**. If the strict reading wins, `reserveFloor()` becomes a flat 10 MON and the
-de-delegation branch stops being an edge case and becomes the normal path for a full recovery.
+`packages/shared/src/reserve.ts` implements the permissive reading.
 
-Do not quote the truth table above as fact until `research/artifacts/q3-reserve-balance.json`
-exists.
+**This is settled — the two readings are the same rule** (961/961 agreement, above), and
+script:c case 1 measured the enforcement directly. Kept here only as the record of how the
+question looked before it was answered; the RESOLVED section is authoritative.
 
 ### Design consequence, if the permissive reading holds
 
@@ -616,6 +613,41 @@ so in `window` mode the cheap early rungs are spent on premature attempts before
 the expensive rungs arrive exactly when the contest starts. Escalation should key off attempts
 that fail **after** maturity, not off a counter. Not yet fixed.
 
+### The back-off that would have stranded the whole ladder
+
+Found by reading, then confirmed by executing both versions side by side against a dead endpoint.
+
+`spray()` protected Monad's per-account inflight gas cap by backing off when too many attempts
+were in flight. It did so with `continue` inside a `for…of`, which **advances the iterator** — so
+hitting the cap did not delay an attempt, it **skipped** it. With `maxInFlight = 1` and eight
+queued attempts:
+
+```
+old impl tried: 100, 102, 104, 106
+skipped       : 101, 103, 105, 107
+```
+
+The attempts carry **consecutive nonces**, and a transaction behind a nonce gap cannot execute at
+all. Skipping nonce 101 therefore does not cost one attempt — it strands 102 and everything after
+it, permanently. **The first back-off silently disabled the entire remaining ladder**, and the
+mechanism meant to protect the flip window was the thing that would have lost it.
+
+It would not have looked like a failure. Every skipped attempt produces no log line, and the
+surviving attempts broadcast normally and are accepted by the RPC; they simply never execute.
+The visible symptom is a spray that "sent" attempts and landed nothing — indistinguishable from
+losing the auction.
+
+Fixed by looping on an index that only advances on an actual broadcast, so back-off delays and
+never discards. Inflight is now counted as sends within the last 3 blocks — the window the chain
+itself uses — rather than a counter that only decremented when backing off and so drifted upward
+the longer the spray ran, throttling hardest at the end.
+
+Verified after the fix: all eight nonces tried exactly once, in order, no gaps.
+
+**This is the fourth silent-environment failure, and the first found before it cost anything.**
+The others announced themselves only as an unexplained loss. Reading the hot path adversarially —
+"what does this do when the guard fires?" — is worth more than another test of the happy path.
+
 ---
 
 ## Q17 — What a gas war actually costs, and the two delegation states
@@ -664,6 +696,23 @@ maths is unaffected — the floor is `min(balance at start, 10 MON)` and we take
 it either way — but the user loses the ability to empty their own pre-existing balance while the
 delegation stands. Reversible by undelegating and waiting 3 quiet blocks, which is exactly what
 Script C measured.
+
+**The sharper form of that cost, learned by hitting it.** The floor binds the *sender* too — the
+sender clause only allows the ending balance to dip by the gas spend, so the most value a
+delegated account can send is `balance - min(balance, 10 MON)`. For any delegated account holding
+**under 10 MON that is exactly zero**: it can pay gas and nothing else. A `delegate` of 100 MON
+from the 5.04 MON victim account was included and reverted for this reason, and the same is true
+of an ordinary transfer of any size.
+
+Consequences worth carrying:
+
+- A protected user under 10 MON cannot move liquid MON at all until they revoke. That is a real
+  usability cost of intake, larger than "10 MON stranded" suggests, and the UI must say so.
+- It is also a small *defensive* property: while our delegation stands, a seed-holding attacker
+  cannot drain the account's liquid balance either — they hit the same floor. It does not
+  protect anything above 10 MON, so it is not a feature to sell, but it is not nothing.
+- Test scripts that spend from the victim account must check the floor locally. `setup-stake`'s
+  `delegate` branch now does; anything new that sends value should too.
 
 Worth stating because it is a cost we impose, small but real, and it is not obvious from the
 outside that accepting protection changes what your own wallet can do.
