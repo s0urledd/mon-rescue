@@ -586,11 +586,26 @@ means roughly one attempt per block:
 | 20 | 0.95 MON |
 | 40 | 1.90 MON |
 
-### Consequence
+### Consequence — pre-queue by default anyway
 
-**Default is to react and fire once.** `SPRAY_MODE=off` sends a single well-priced attempt and
-only falls through to the ladder if it fails to land. Pre-queuing is `SPRAY_MODE=window`, opt-in,
-for a rescue believed to be contested.
+The costing above argues for reacting, and that argument is wrong, because it optimises the
+wrong side of an asymmetric loss:
+
+- pre-queuing costs ~2 MON and can only ever **win** a block
+- reacting saves ~2 MON and can **lose the entire position**
+
+We also cannot know in advance whether a rescue is contested, and by the time we could know it
+is already decided. A rescue exists precisely because someone hostile holds the key; assuming
+they are passive is the wrong default.
+
+So `window` is the default whenever there is a flip to wait for. `off` applies only when the
+position is **already mature** — there is no flip to arrive ahead of, so a single well-priced
+attempt is exactly right and queueing would burn gas for nothing.
+
+**A pattern worth naming.** This is the third time in this project that a default was set for
+frugality on a path where being short is fatal and being long merely costs money: the 350k gas
+limit that lost an entire attempt, the fee multiplier that scaled a constant, and this. The
+operator has said plainly that cost is not the constraint. Defaults should reflect that.
 
 The earlier framing — "the fastest method is to not detect at all" — was right about the
 mechanism and wrong about the economics once a local node removed the detection cost. It bought

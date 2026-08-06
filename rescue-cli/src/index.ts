@@ -398,8 +398,17 @@ async function main() {
     // decides and the spray bought nothing.
     //
     // It is not free: every premature attempt reverts and is charged its full gas limit, so
-    // covering the ~40-block uncertainty costs ~2 MON in burnt attempts. Default is therefore
-    // to react, and pre-queue only when told to.
+    // covering the ~40-block uncertainty costs ~2 MON in burnt attempts.
+    //
+    // Pre-queue anyway, whenever there is a flip to wait for. The loss function is asymmetric:
+    // pre-queuing costs ~2 MON and can only ever win a block, while reacting saves ~2 MON and
+    // can lose the entire position. We also cannot know in advance whether a rescue is
+    // contested — and by the time we could know, it is decided. A rescue exists precisely
+    // because someone hostile holds the key, so assuming they are passive is the wrong default.
+    //
+    // `off` applies only when the position is ALREADY mature: there is no flip to arrive ahead
+    // of, so one well-priced attempt now is exactly right and queueing would burn gas for
+    // nothing.
     const sprayMode = process.env.SPRAY_MODE ?? (a.phase === 'due' ? 'off' : 'window');
     if (sprayMode === 'off') {
       console.log(`firing a single attempt (SPRAY_MODE=off — reacting, not pre-queueing)`);
