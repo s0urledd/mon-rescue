@@ -552,6 +552,59 @@ Two further constraints that bite the hot path specifically:
 
 ---
 
+## Q16 — Real gas, and why the attacker chooses our gas bill
+
+The explorer's internal trace of the successful rescue gives measured numbers rather than
+documented ones:
+
+```
+withdraw #1   given 320,771   used 68,675
+withdraw #2   given 252,149   used 68,675
+withdraw #3   given 183,528   used 68,675
+sweep -> safe given  98,803   used      0
+```
+
+`withdraw` costs **exactly** the documented 68,675. The sweep to a plain EOA costs
+essentially nothing. Total consumption was ~251,200 against a 350,000 limit — so the successful
+run had real headroom, and `estimateRescueGas` has been recalibrated against this instead of
+guessed overheads.
+
+**This also fully explains both runs.** The first passed `claimRewardsToo = true`, needing
+`206,025 + 3 x 155,375 = 672,150`; the second passed `false`, needing ~251,200. Same 350,000
+limit, opposite outcomes. Nothing was flaky.
+
+### The number of slots is the attacker's choice, not ours
+
+Each withdrawal request needs its own `withdraw()` call. Three slots cost 206,025 where one
+would have cost 68,675 — the split was ours here, but **in a real compromise the attacker
+decides how many `undelegate` calls to make**, and therefore sets our gas bill:
+
+| slots | gas | cost per attempt at 20x |
+|---|---|---|
+| 1 | ~129k | 0.26 MON |
+| 3 | ~266k | 0.53 MON |
+| 10 | ~747k | 1.49 MON |
+| 50 | ~3.5M | 6.99 MON |
+| 256 (the maximum) | ~17.6M | 35.28 MON |
+
+At the 256-slot maximum a single attempt costs ~35 MON and still fits inside the 30M
+per-transaction limit — but it collides with the inflight budget of `min(10 MON, balance)`,
+which means **a maximally split position allows fewer than one inflight attempt at a 20x
+multiplier**. The spray collapses to a single shot.
+
+This is a cheaper griefing vector than the `withdrawId` exhaustion considered in Q10, and it
+does not require exhausting anything: an attacker who splits into 50 slots while unstaking has
+multiplied our per-attempt cost 13x and cut our shots proportionally, for the price of 50
+ordinary transactions.
+
+**Not yet mitigated.** The obvious response is to split the rescue across several transactions
+— each claiming a subset of slots — so that no single one is huge and the inflight budget
+buys more attempts. That trades atomicity per transaction for parallelism across them, which
+is the right trade only because each partial sweep still lands at the destination-locked
+address. Worth building before mainnet.
+
+---
+
 ## Q15 — The first firing: it fired, and ran out of gas
 
 2026-08-06, epoch 1029, against the three positions matured at 1019.

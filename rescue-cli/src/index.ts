@@ -85,8 +85,8 @@ async function main() {
 
   const guardian = privateKeyToAccount(guardianKey);
   const chain = chainById(CHAIN_ID);
-  const urls = RPC_POOL[CHAIN_ID] ?? [];
-  if (urls.length === 0) throw new Error(`no RPC endpoints for chain ${CHAIN_ID}`);
+  const remoteUrls = RPC_POOL[CHAIN_ID] ?? [];
+  if (remoteUrls.length === 0) throw new Error(`no RPC endpoints for chain ${CHAIN_ID}`);
 
   // Reads take the lowest-latency transport available; broadcast always fans out to every
   // remote endpoint, because redundancy costs nothing once the bytes are signed.
@@ -97,13 +97,18 @@ async function main() {
     ...transportConfigFromEnv(CHAIN_ID),
     ...(local.found ? { httpUrl: local.httpUrl, wsUrl: local.wsUrl } : {}),
   });
+  // Broadcast through the local node FIRST when there is one. Reads were already local, but
+  // submission was going out over the network at 69-261ms measured, while a node answering in
+  // single-digit milliseconds sat on the same host — and that node is the one that forwards to
+  // the upcoming leaders. Remote endpoints stay in the list behind it as failover.
+  const urls = local.found && local.httpUrl ? [local.httpUrl, ...remoteUrls] : remoteUrls;
   const wallet = createWalletClient({ account: guardian, chain, transport: http(urls[0]) });
 
   console.log(`guardian  ${guardian.address}`);
   console.log(`victim    ${victim}`);
   console.log(`reads     ${resolved.description}`);
-  console.log(`broadcast ${urls.length} endpoint(s)`);
   console.log(`node      ${local.detail}`);
+  console.log(`broadcast ${urls.length} endpoint(s)${local.found ? ', local first' : ' (all remote)'}`);
   if (!local.found) {
     console.warn(
       `  WARNING: polling a remote endpoint. Detection latency is bounded by that round-trip,\n` +

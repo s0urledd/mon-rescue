@@ -326,13 +326,16 @@ export interface RescueGasEstimate {
  * margin, not a round number chosen upward "to be safe".
  */
 export function estimateRescueGas(positionCount: number, claimRewards: boolean): RescueGasEstimate {
+  // Calibrated against a real trace: tx 0x6c285d49… claimed three slots and the internal calls
+  // measured 68,675 gas each — exactly the documented figure — with ~251,200 consumed overall
+  // against a 350,000 limit. Overheads below are derived from that run rather than guessed.
   const n = BigInt(Math.max(1, positionCount));
   const perPosition = STAKING_GAS.withdraw + (claimRewards ? STAKING_GAS.claimRewards : 0n);
   const calls = n * perPosition;
   const baseTx = 21_000n;
-  const calldata = 8_000n;      // arrays of validator ids and slots
-  const contract = 15_000n * n; // loop, event emission, balance bookkeeping
-  const sweep = 30_000n;        // native transfer plus the reserve-floor arithmetic
+  const calldata = 4_000n;      // arrays of validator ids and slots
+  const contract = 6_000n * n;  // loop, event emission, balance bookkeeping (measured ~15k total for 3)
+  const sweep = 12_000n;        // native transfer to an EOA measured at ~0 plus the floor arithmetic
   const subtotal = baseTx + calldata + calls + contract + sweep;
   // 25% margin: the precompile consumes all gas on a failed call, so being short is fatal
   // while being long only costs the difference.
