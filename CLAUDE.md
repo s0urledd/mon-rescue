@@ -1,0 +1,164 @@
+# MonRescue — working context
+
+Read this first. It carries the framing that is expensive to rediscover.
+
+---
+
+## What this is
+
+A **commercial rescue service** for Monad delegators, private repo, not open source. A user
+whose key is compromised comes to us; we recover their staked or unbonding MON to an address
+only they control.
+
+Not a public good, not a hackathon submission, not a demo. Prose in this repo is for us, not for
+an audience. Do not write outward-facing narrative, grant framing, or PR bodies aimed at
+strangers.
+
+## The framing — everything else follows from this
+
+**Assume the adversary is always trying to take it before us, and always will be.** A hostile
+withdraw is not a scenario to plan for; it is the default state. There is no version of this
+where the other side is slow, distracted, or absent, and any design that quietly depends on
+that is wrong.
+
+The goal is therefore not "fast enough". It is **the fastest system that can be built** — and
+where speed ties, the one that outbids.
+
+Two corollaries that keep getting rediscovered the hard way:
+
+- Never set a default for frugality on a path where being short loses the position.
+- Never treat "probably uncontested" as a reason to do less. We cannot know it is uncontested,
+  and by the time we could, it is decided.
+
+## The threat model, precisely
+
+The attacker **holds the seed**. They are cryptographically indistinguishable from the owner.
+That is not a caveat — it is the whole problem.
+
+- **Liquid MON is not defensible.** A seed holder takes it in one block. Do not claim otherwise.
+- **Staked and unbonding MON is defensible**, because `undelegate` puts funds behind
+  `WITHDRAWAL_DELAY` for *everyone*, including the attacker. That delay is the entire product.
+- The attacker usually unstakes themselves. Their `Undelegate` event hands us the validator, the
+  slot, the amount and the exact maturity epoch — the theft starting is our clock starting.
+- The fight is at the **unlock**, and both sides know when it is.
+
+**Nobody registers before being hacked.** The primary flow is reactive: the user arrives already
+compromised. The unbonding delay (2–3 epochs, 8–13h) is what makes that survivable.
+
+## The one thing that must never break
+
+`SAFE_ADDRESS` is immutable, set at construction, one contract instance per user. **No function
+anywhere takes a recipient address.** Even an attacker calling `rescue()` moves funds to the
+user's own safe address.
+
+This is why `rescue()` and `sweep()` are permissionless: access control on a destination-locked
+function buys nothing and costs liveness.
+
+We never accept a seed phrase or private key. There is no code path that could. The user's only
+input is signatures made in their own wallet.
+
+---
+
+## Measured facts — do not re-derive these
+
+| Fact | Value |
+|---|---|
+| Boundary block | exactly `(epoch - 1) × 50,000` |
+| Epoch begins | 4,962–4,999 blocks after the boundary |
+| Block time | 0.301s → epoch ≈ 4.2h (docs say 5.5h; wrong) |
+| Epoch advances in | **transaction 0** of the flip block (`syscallOnEpochChange`) |
+| `withdrawEpoch` | the **activation** epoch (`n+1`, or `n+2` past the boundary) |
+| Maturity | `withdrawEpoch + WITHDRAWAL_DELAY` |
+| `withdraw()` gas | exactly **68,675** |
+| `claimRewards()` gas | 155,375 — **70% of per-position cost**, usually not worth it |
+| Sweep to an EOA | ~0 gas |
+| Reserve floor | `min(balance at start, 10 MON)` — strands only what was already there |
+| Mainnet base fee | pinned at the 100 gwei floor |
+| Mainnet tips | p50 **2 gwei**, p90 78, **max observed 1,482** |
+| Detection latency | ~8ms local node, ~116ms remote RPC |
+
+Full evidence with transaction hashes is in `research/FINDINGS.md`. Every claim there was
+executed against live chain, not read from documentation.
+
+**Phase 0 is closed.** Q1 (atomic claim + sweep) is answered YES — tx `0x6c285d49…`, block
+51,416,783, 500.112413 MON delivered in one block by a guardian that never held the victim's key.
+
+---
+
+## Design decisions and why
+
+**Gas is charged on the LIMIT, not usage, with no refunds.** Being short is fatal — the staking
+precompile consumes all gas on failure, so an under-sized limit loses the whole attempt at full
+cost. Being long only costs the difference. `estimateRescueGas()` sizes from position count.
+
+**Fees are a MON budget per attempt, not a multiplier.** `eth_maxPriorityFeePerGas` returns a
+hardcoded 2 gwei on Monad, so a multiplier over it scaled a constant that measured nothing.
+`observeFees()` samples real bids; `feeSchedule()` climbs on a cubic curve so uncontested
+rescues stay near-free and a real fight reaches the authorised budget.
+
+**Pre-queue by default when waiting for a flip.** The epoch advances in tx 0 of the flip block,
+so a transaction already in a leader's mempool lands in that block; reacting reaches only N+1.
+Costs ~2 MON, can only win a block, never loses one.
+
+**Run beside a local node.** Detection latency is bounded purely by the round-trip of whatever
+we poll. Reads and broadcast both go local first, remotes behind as failover.
+
+**One guardian key per concurrently-armed customer.** Monad's inflight gas cap is per account and
+belongs to the guardian; two customers maturing in the same epoch would split one
+`min(10 MON, balance)` budget. Guardians choose nothing, so a pool carries no custody risk.
+
+---
+
+## The recurring mistake — check for it
+
+**Three times** a default was set for frugality on a path where being short is fatal and being
+long merely costs money:
+
+1. A 350k gas limit that lost an entire rescue attempt
+2. A fee multiplier that scaled a constant
+3. Defaulting away from pre-queuing to save ~2 MON
+
+The operator has said plainly that cost is not the constraint. **Optimise for winning.** When a
+default trades a small certain cost against a small chance of total loss, take the cost.
+
+## The other recurring failure class
+
+Four separate failures, all **silent environment assumptions**, none logic errors:
+
+- a stale `dist/` that died on import and looked identical to "armed and waiting" for two days
+- a log lookback sized for prompt claims, missing a two-day-old position
+- a relative path resolving differently per package under `pnpm --filter`
+- a budget exceeding the guardian balance, aborting instead of scaling
+
+Every one would have lost funds in a real rescue and none announced itself. `nohup` is not
+supervision. Production needs `systemd` with `Restart=always` and a heartbeat visible from
+**outside** the process — a process that is not running cannot report that it is not running.
+
+---
+
+## Open items
+
+- **Slot-splitting griefing.** Each withdrawal slot needs its own `withdraw()` call, and the
+  attacker chooses how many `undelegate` calls to make. 50 slots multiplies our per-attempt cost
+  13x; at the 256 maximum one attempt costs ~35 MON and collides with the inflight budget,
+  collapsing the spray to a single shot. Likely fix: split the rescue across transactions.
+- **Ladder escalates by attempt index**, so in `window` mode the cheap rungs are spent on
+  premature attempts and the expensive ones arrive exactly when the contest starts. Should key
+  off attempts failing *after* maturity.
+- **Battle test not run.** Every rescue so far was uncontested. Winning at an *equal* fee is the
+  result that means something; losing at a lower fee is expected.
+- **Boundary A/B contrast unmeasured.** `n+1` activation is confirmed; `n+2` is predicted from
+  the same rule but never observed.
+- **Same-nonce replacement is undocumented on Monad.** Do not build on it.
+
+---
+
+## Conventions
+
+- Commit messages: what changed and why, no marketing. End with the Co-Authored-By trailer.
+- Never commit `.env`, `window.json`, or any key.
+- Mark anything unverified as UNVERIFIED and say so out loud. A rescue tool that oversells
+  itself is worse than none.
+- When a measurement contradicts a documented claim, **the measurement wins** and the
+  contradiction goes in FINDINGS.
+- Run scripts rebuild `@monrescue/shared` first — a stale `dist` has already cost one rescue.

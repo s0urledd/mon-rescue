@@ -3,97 +3,53 @@
 A delegator-protection layer for [Monad](https://monad.xyz): an alert engine for staking
 health, and a destination-locked rescue path for delegators whose keys have been compromised.
 
-**Status: Phase 0 (research). The rescue path is not proven yet — see
-[`research/FINDINGS.md`](research/FINDINGS.md).** The alert engine is unblocked and is the
-first thing to ship.
+## Status
 
-## What this is
+**Phase 0 closed. The rescue works.**
 
-Two components, in priority order:
+Transaction [`0x6c285d49…`](https://testnet.monadvision.com/tx/0x6c285d49425cd829bb74dc784818fcbd0279a8fcb4fa0736c98460d2b313e17b),
+block 51,416,783: three matured withdrawals claimed from the staking precompile and
+**500.112413 MON swept to the destination-locked safe address in a single block**, sent by a
+guardian key that never held the victim's key.
 
-1. **Alert engine + public Telegram bot** (`watcher/`) — send a wallet address, get its
-   delegations, rewards, and validator health. Opt in to alerts for validators going inactive,
-   raising commission, or going dark for 24h+, and for unexpected unstakes on a watched address.
-   Read-only, public, holds no keys.
-2. **Guardian rescue** (`contracts/`, `rescue-cli/`) — while the wallet is still safe, the user
-   delegates their EOA to their own rescue contract instance via an EIP-7702 authorization and
-   commits a fixed safe address. If the wallet is later compromised, a guardian triggers the
-   rescue, and the contract can only move funds to that pre-committed address.
+| question | answer |
+|---|---|
+| Q1 — atomic claim + sweep in one 7702 transaction | **YES**, measured |
+| Q2 — viem submits a working `0x04` to Monad | **YES**, measured |
+| Q3 — reserve floor | `min(start, 10 MON)`; the "contradiction" was illusory |
+| Q4 — a separate guardian can fire it | **YES**, same run |
+| Q5 — can a withdrawal name a recipient | **NO** — which is why the rescue must be atomic |
 
-## What it does not do, stated plainly
+Not yet done: the **battle test**. Every rescue so far was uncontested. Winning at an equal fee
+is the result that means something.
 
-MonRescue **cannot** protect a wallet from someone who holds its seed phrase. That is not a
-limitation of this implementation; it is what holding the seed means. Specifically:
+## How it works
 
-- The attacker can submit a new EIP-7702 authorization re-delegating the EOA to their own
-  drainer, or clear ours, or simply transfer liquid MON.
-- Our advantage is **speed, pre-staging, and surprise** — not authorization exclusivity.
-- The defensible case is **staked and unbonding MON**, where the protocol's own unbonding delay
-  means the attacker must wait too. Liquid MON against an alert attacker is a coin flip and we
-  do not claim otherwise.
+The attacker holds the seed and usually unstakes the position themselves. They cannot take it
+immediately — `undelegate` puts funds behind `WITHDRAWAL_DELAY` for everyone, including them.
+That delay is the entire product, and their own `Undelegate` event hands us the validator, the
+slot, the amount and the exact maturity epoch.
 
-The only design that genuinely defeats a live seed holder is a smart account with a withdrawal
-timelock and a guardian veto — a migration, not a retrofit. It is on the roadmap, not in this
-repository.
+At the unlock we fire one transaction that claims and sweeps atomically, to an address burned
+into the contract at construction. No function anywhere takes a recipient, so even the attacker
+calling it moves funds to the user's own safe address.
 
-### MonRescue will never ask for your seed phrase or private key
+We never see a seed phrase or a private key.
 
-There is no code path in this repository that accepts one, and there never will be. The only
-things a user ever produces are two signatures made in their own wallet: the 7702 authorization
-and the pre-signed rescue payload. Anyone asking a compromised user for a seed is robbing them.
+## Operating notes
 
-## Layout
+- **Run beside a Monad node.** Detection is ~8ms local against ~116ms remote, and both reads and
+  broadcast go local first. Auto-detected at `127.0.0.1:8080`.
+- **Fees are a MON budget per attempt**, not a multiplier — `eth_maxPriorityFeePerGas` returns a
+  hardcoded 2 gwei on Monad, so multiplying it measured nothing. Attempts climb a cubic curve
+  from 2x the p90 bid toward the budget.
+- **Gas is charged on the limit, not usage, with no refunds**, and the staking precompile
+  consumes all gas on failure. `estimateRescueGas()` sizes from position count; being short
+  loses the whole attempt.
+- **One guardian key per concurrently-armed customer** — Monad's inflight gas cap is per account
+  and belongs to the guardian.
+- `nohup` is not supervision. Use `systemd` with `Restart=always` and a heartbeat visible from
+  outside the process.
 
-```
-packages/shared/   staking precompile ABI + address, chain config, reserve and epoch logic
-contracts/         MonRescue.sol — destination-locked rescue contract
-watcher/           alert engine + Telegram bot          (ship first)
-rescue-cli/        guardian hot path: pre-sign, arm, fire
-research/          Phase 0 harness + FINDINGS.md        (the design record)
-```
-
-The staking ABI and precompile address live in exactly one place (`packages/shared`) and are
-never duplicated.
-
-## Monad-specific constraints this encodes
-
-Three things make an Ethereum rescue tool wrong on Monad. Each is verified and encoded:
-
-1. **No private mempool, no bundle relay.** Atomicity comes from an EIP-7702 batch call, not a
-   Flashbots bundle. Ordering is a priority gas auction against leaders, so the hot path
-   broadcasts to every RPC at once and bids the fee up.
-2. **The 10 MON reserve rule.** A 7702-delegated EOA reverts any transaction ending below
-   `min(balance at start, 10 MON)`. Note this is *not* a flat 10 MON — a wallet already drained
-   to zero can be swept in full. Encoded in `packages/shared/src/reserve.ts`.
-3. **Epoch-bound unbonding, with no computable unlock block.** Rounds advance independently of
-   blocks, so the boundary cannot be predicted arithmetically. The trigger is a polled
-   `getEpoch()` transition.
-
-## Verify the research claims yourself
-
-No key required — this checks the live chain against every factual claim in `FINDINGS.md`:
-
-```bash
-pnpm install
-pnpm --filter @monrescue/shared build
-CHAIN_ID=10143 pnpm --filter @monrescue/research verify
-```
-
-To close the remaining gate you need a funded testnet key (see `.env.example` at the repo root), then
-run scripts A→D. Each writes its transaction hashes to `research/artifacts/`.
-
-## Build
-
-```bash
-pnpm install
-pnpm --filter @monrescue/shared build
-pnpm -r typecheck
-```
-
-The contract builds with Foundry (`forge build` in `contracts/`). It was verified during
-development with `solc` 0.8.36 directly, since Foundry could not be installed in the build
-environment.
-
-## License
-
-MIT. See [LICENSE](LICENSE).
+`CLAUDE.md` carries the working context. `research/FINDINGS.md` has every claim with its
+evidence. `STEPS.md` is the runbook.

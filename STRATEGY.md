@@ -26,59 +26,49 @@ does both — but only if it executes first.
 
 ---
 
-## The methods, ranked
+## The methods, ranked — revised after measurement
 
-### 1. Pre-submitted spray — fastest possible, and the primary
+The original ranking put "pre-submitted spray" first on the grounds that detection latency was
+unavoidable. Measurement changed the picture.
 
-**Do not detect anything.** Pre-sign a sequence of identical rescue transactions at
-consecutive nonces and keep one in flight throughout the ~100-block uncertainty window, so a
-transaction is **already queued at the leader when the epoch flips**.
+### 1. React from a local node, and pre-queue across the flip window
 
-Reaction time is zero, because there is no reaction. Every other method pays detection latency;
-this one structurally cannot.
+Detection beside a local node is **~8ms** — under 4% of a block — against ~116ms over remote
+RPC. The spray was designed for the 116ms world; in the 8ms world its only remaining value is
+narrow and specific:
 
-*Why it is safe.* An attempt that executes before maturity reverts — `withdraw()` fails,
-nothing is credited, `_sweep` reverts with `NothingToSweep`. A revert rolls back all state, so
-**the withdrawal request is left completely intact** for the next attempt. The only cost of a
-premature attempt is gas.
+**The epoch advances in transaction 0 of the flip block.** So a transaction already sitting in a
+leader's mempool is included in *that same block*, after the syscall, and succeeds. Reacting —
+however fast — reaches only block **N+1**.
 
-*Why it works on Monad specifically.* Proposers cannot see current state, so transactions that
-will revert are still included and still charged. On a chain that dropped such transactions
-pre-submission would be pointless.
+That one block decides the race in exactly one of three cases:
 
-**Verified, not assumed.** Scanning 1,287 receipts across 400 testnet blocks found reverted
-transactions sitting in blocks with real gas consumed — e.g.
-`0x39d25782397ad8b484c219fd11d7f2f7c12db01b7c7758078bb9f1b0272d2209` at block 50,578,382 with
-`gasUsed` 176,821. A failed transaction is included and charged, which is exactly the property
-the spray depends on.
+| attacker | us | outcome |
+|---|---|---|
+| reacts | reacts | both at N+1 — fee decides |
+| reacts | pre-queued | we are in N, they are in N+1 — **we win outright** |
+| pre-queues | pre-queues | both in N — fee decides |
 
-*Cost.* Gas on every attempt that lands early — roughly 30-40 attempts at one per three blocks.
-The rescued position is worth orders of magnitude more.
+Pre-queuing costs ~2 MON in premature reverts (each is charged its full gas limit). **Do it
+anyway.** The loss is asymmetric: it can only ever win a block, while skipping it can lose the
+entire position, and we cannot know in advance whether a rescue is contested. `SPRAY_MODE=off`
+applies only when the position is already mature and there is no flip to arrive ahead of.
 
-*Constraint.* Monad caps an account's total gas across inflight transactions (last 3 blocks) at
-`min(10 MON, lagged balance)`. An unbounded spray throttles itself at exactly the wrong moment,
-so `maxInFlight` is enforced and the guardian must hold well over 10 MON.
+### 2. Everything expensive happens before the window
 
-Implemented in `rescue-cli/src/strategies.ts`.
+Positions discovered, reserve floor computed, gas sized, fees planned, and **every attempt
+signed** — all while idle. Measured: 31 attempts pre-signed in 118ms. The flip window does
+nothing but broadcast.
 
-### 2. Event-driven on a local node
+### 3. Local node for both reads and broadcast
 
-Monad exposes execution events from the node itself rather than over JSON-RPC. Running the
-daemon beside a node turns detection from a poll into a notification. This is the best
-*detector*, and the natural backstop behind the spray.
+Submission used to go to remote endpoints only, measured at 69–261ms, while a node answering in
+single-digit milliseconds sat on the same host — and that node is the one that forwards to
+upcoming leaders. Local first, remotes behind as failover.
 
-### 3. IPC polling on a local node
-
-`MONAD_IPC_PATH` points the client at the node's unix socket: no TCP, no TLS, no HTTP framing.
-Roughly a millisecond per read instead of tens. Implemented in
-`packages/shared/src/transport.ts`, which prefers IPC → local WebSocket → local HTTP → remote.
-
-### 4. Remote RPC polling — the naive baseline
-
-Measured at **~116ms expected detection latency** (half a poll interval plus one round-trip)
-against public endpoints. Polling faster than the round-trip cannot help; the benchmark reports
-where that floor is. This is what a straightforward implementation does, and it is roughly two
-orders of magnitude slower than method 1.
+Remote failover is worth keeping for a reason the first analysis got wrong: the retry cycle
+belongs to the **owner node**, so each endpoint submitted to runs its own `K=3` cycle of
+re-forwarding. Across the retry window that is genuinely broader coverage, not merely insurance.
 
 ---
 
@@ -109,37 +99,50 @@ watching the **safe address balance**, not by waiting on our own receipt.
 
 ---
 
-## Fee strategy
+## Fee strategy — a budget, not a multiplier
 
-Monad leaders order by descending fee-per-gas, so the race is an auction and there is no
-private mempool to route around it. Two consequences:
+Leaders order by descending total gas price, so the race is an auction with no private mempool
+to route around it.
 
-- **Bid to win.** The rescued position dwarfs any plausible fee; being outbid is the expensive
-  outcome, not overpaying.
-- **Escalate rather than guess.** `escalate.ts` pre-signs a ladder of increasing fees **sharing
-  one nonce**, so at most one rung can ever be included. Start low, escalate only if a rung
-  fails to land.
+`PRIORITY_FEE_MULTIPLIER` was meaningless: it scaled `estimateFeesPerGas`, and Monad's
+`eth_maxPriorityFeePerGas` returns a **hardcoded 2 gwei**. "20x" multiplied a constant that
+carries no information about competition.
 
-Note the ladder and the spray are different mechanisms and must not be confused: the ladder
-shares one nonce (mutually exclusive attempts at one slot), the spray uses consecutive nonces
-(independent attempts across time).
+Measured on mainnet across 69 transactions: base pinned at the **100 gwei floor**, median tip
+**2 gwei**, p90 78, **highest observed 1,482**. Beating the median is free; beating the top
+bidder is not, and an attacker racing us is a top bidder by construction. That 700x spread is
+the question in one number.
 
-There is precedent that this is winnable: **Harpie** beat drainer bots on Ethereum at a claimed
-~99.8% success rate using nothing but gas outbidding in the public mempool — no private relay.
-Monad's default descending-fee ordering is the same lever.
+So fees are **MON per attempt**. `observeFees()` samples live bids, `feeSchedule()` climbs from
+2x the p90 toward the authorised budget on a **cubic** curve, and every rung is pre-signed.
+With a 20 MON budget on mainnet: attempt 1 costs 0.047 MON, attempt 4 costs 0.45, and 20 MON is
+reached only at attempt 12. The first three together cost 0.28 MON.
+
+Cubic rather than linear because most rescues are uncontested — a linear ramp reached half the
+budget by mid-sequence and spent heavily on fights that were not happening. The spray checks
+whether the rescue landed before each attempt, so an early cheap success stops the ladder before
+the expensive rungs are ever broadcast.
+
+Consecutive nonces, not a shared one: same-nonce replacement is undocumented on Monad, so
+relying on it to supersede a cheaper attempt would build on an assumption.
+
+There is precedent that outbidding works: **Harpie** beat drainer bots on Ethereum at a claimed
+~99.8% success rate using nothing but gas outbidding in the public mempool.
 
 ---
 
 ## Layered defence, in firing order
 
-1. **Before compromise** — the user delegates to their rescue contract and signs an
-   authorization window. Nothing else works without this.
+1. **At intake** — the user authorises delegation to their own rescue contract and signs an
+   authorization window. Usually this happens *after* the compromise, not before: nobody
+   registers ahead of time, and the unbonding delay is what makes late arrival survivable.
 2. **On compromise signal** — `guard.ts` watches for a delegation change, a nonce advance, or
    an unexpected unstake. A delegation change is the loudest signal available: only one 7702
    delegation is active at a time, so a sophisticated attacker must re-delegate before they can
    steal atomically, which announces the attack.
-3. **Through the window** — the spray keeps a transaction queued.
-4. **At the flip** — detectors fire as a backstop if the spray is exhausted.
+3. **Through the window** — attempts stay queued so one is present when the flip block is
+   built, which is the only way to land in that block rather than the one after it.
+4. **At the flip** — the ladder escalates if nothing has landed.
 5. **After a loss** — this is not over. If the attacker's `withdraw()` landed first, the funds
    are sitting on an EOA still delegated to a destination-locked contract, and `sweep()` takes
    them. `rescue()` deliberately does not abort when withdrawals fail, precisely because the
