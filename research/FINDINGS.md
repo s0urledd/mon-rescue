@@ -552,6 +552,58 @@ Two further constraints that bite the hot path specifically:
 
 ---
 
+## Q17 — What a gas war actually costs, and the two delegation states
+
+### Bidding: the multiplier was meaningless, the budget is not
+
+`PRIORITY_FEE_MULTIPLIER` multiplied whatever `estimateFeesPerGas` returned — and Monad's
+`eth_maxPriorityFeePerGas` is a **hardcoded 2 gwei**, not a live recommendation. So "20x" scaled
+a constant carrying no information about competition. It was a number that felt like a decision
+and wasn't one.
+
+Sampling real transactions instead, on **mainnet** across 69 transactions in 5 blocks:
+
+| | |
+|---|---|
+| base fee | **100 gwei — pinned at the documented floor**, the chain is not congested |
+| median tip | 2 gwei (i.e. most senders take the hardcoded default) |
+| p90 tip | 78 gwei |
+| **highest tip observed** | **1,482 gwei** |
+
+So beating the median is free and beating the top bidder is not — and an attacker racing us is a
+top bidder by construction. The spread between p50 and max is **700x**, which is the whole
+question compressed into one number.
+
+Fees are now expressed as **MON per attempt**, which is what the operator actually decides.
+`planFee` samples live bids, sits `FEE_OVERTOP` (default 10x) above the highest one, and caps
+the result by `MAX_SPEND_PER_ATTEMPT_MON`. At 5 MON against a 330k-gas rescue that bids ~14,800
+gwei — ten times the top observed bid — for about 4.9 MON.
+
+Against a *quiet* chain this overbids for free. Against a contested one it spends exactly what
+was authorised and no more. Both are the intended behaviour, and neither requires guessing a
+multiplier.
+
+### The two delegation states are a real distinction, and I had it wrong
+
+An earlier note framed this as "does our authorization exist yet". That is a different question.
+The distinction that matters on-chain is:
+
+| | can use the emptying exception | can go below 10 MON |
+|---|---|---|
+| **not 7702-delegated at all** | yes, after `k=3` quiet blocks | yes |
+| **delegated to anything** (ours or an attacker's) | **no** | no |
+
+So delegating a previously-undelegated wallet **imposes** the reserve floor on it. Our sweep
+maths is unaffected — the floor is `min(balance at start, 10 MON)` and we take everything above
+it either way — but the user loses the ability to empty their own pre-existing balance while the
+delegation stands. Reversible by undelegating and waiting 3 quiet blocks, which is exactly what
+Script C measured.
+
+Worth stating because it is a cost we impose, small but real, and it is not obvious from the
+outside that accepting protection changes what your own wallet can do.
+
+---
+
 ## Q16 — Real gas, and why the attacker chooses our gas bill
 
 The explorer's internal trace of the successful rescue gives measured numbers rather than

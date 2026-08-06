@@ -23,6 +23,7 @@ import {
   watchGuardianBalance, GUARDIAN_INFLIGHT_FLOOR,
 } from './preflight.js';
 import { selectAuthorizations, validateWindow, assessWindow, type AuthorizationWindow } from './authorization.js';
+import { observeFees, planFee, maxSpendPerAttemptFromEnv } from './fees.js';
 import { isAbsolute, resolve } from 'node:path';
 
 /**
@@ -199,10 +200,10 @@ async function main() {
   assertSweepAllowed(startBalance, totalAmount, plan.sweepable);
 
   // --- fees and budget ----------------------------------------------------
-  // eth_maxPriorityFeePerGas is a hardcoded 2 gwei on Monad rather than a live oracle, so it is
-  // a floor to multiply up from, not a recommendation to trust.
-  const fees = await client.estimateFeesPerGas();
-  const multiplier = BigInt(process.env.PRIORITY_FEE_MULTIPLIER ?? 20);
+  // Bid from what the chain is actually paying, not from a multiplier over an estimate.
+  // Monad's eth_maxPriorityFeePerGas returns a hardcoded 2 gwei, so a multiplier over it scaled
+  // a constant that carries no information about competition. observeFees samples real bids.
+  const observed = await observeFees(client, 5);
   // Size the gas limit from the work, not from a fixed default. The previous fixed 350k was
   // chosen for frugality and never checked against the precompile's documented costs; three
   // positions need ~776k, so the transaction ran out of gas and consumed the entire limit
@@ -212,8 +213,10 @@ async function main() {
   const gas = BigInt(process.env.GAS_LIMIT ?? gasEstimate.gasLimit);
   console.log(`\ngas limit ${gas}`);
   if (!process.env.GAS_LIMIT) console.log(`  ${gasEstimate.breakdown}`);
-  const maxFeePerGas = (fees.maxFeePerGas ?? 100_000_000_000n) * multiplier;
-  const maxPriorityFeePerGas = (fees.maxPriorityFeePerGas ?? 2_000_000_000n) * multiplier;
+  const feePlan = planFee(observed, gas, maxSpendPerAttemptFromEnv());
+  const maxFeePerGas = feePlan.maxFeePerGas;
+  const maxPriorityFeePerGas = feePlan.maxPriorityFeePerGas;
+  console.log(`fee: ${feePlan.explanation}`);
   const budget = gasBudgetFromEnv();
 
   const guardianBalance = await client.getBalance({ address: guardian.address });
