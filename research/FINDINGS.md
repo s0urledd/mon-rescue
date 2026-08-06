@@ -552,6 +552,57 @@ Two further constraints that bite the hot path specifically:
 
 ---
 
+## Q18 — Why spray at all? Mostly, you should not
+
+The spray was designed when detection cost **~116ms** over remote RPC — roughly a third of a
+block — so "we will notice too late to react" was a real problem and pre-queuing was the answer.
+
+Beside a local node detection is **~8ms**, under 4% of a block. The premise is gone.
+
+### What pre-queuing still buys: exactly one block
+
+The epoch advances in **transaction 0** of the flip block (Q12). So a transaction already
+sitting in a leader's mempool is included in *that same block*, after the syscall, and succeeds.
+Reacting to the flip — however fast — can only reach block **N+1**.
+
+That one block is decisive in exactly one of three cases:
+
+| attacker | us | outcome |
+|---|---|---|
+| reacts | reacts | both at N+1 — **fee decides**, spray bought nothing |
+| reacts | pre-queued | we are in N, they are in N+1 — **we win outright** |
+| pre-queues | pre-queues | both in N — **fee decides**, spray bought nothing |
+
+### What it costs
+
+Every premature attempt reverts (`withdraw` not yet matured) and is charged its **full gas
+limit**, because Monad charges the limit and the precompile consumes all gas on failure. A
+queued transaction is included within about a block, so covering the ~40-block flip uncertainty
+means roughly one attempt per block:
+
+| attempts | burnt on premature reverts |
+|---|---|
+| 5 | 0.24 MON |
+| 20 | 0.95 MON |
+| 40 | 1.90 MON |
+
+### Consequence
+
+**Default is to react and fire once.** `SPRAY_MODE=off` sends a single well-priced attempt and
+only falls through to the ladder if it fails to land. Pre-queuing is `SPRAY_MODE=window`, opt-in,
+for a rescue believed to be contested.
+
+The earlier framing — "the fastest method is to not detect at all" — was right about the
+mechanism and wrong about the economics once a local node removed the detection cost. It bought
+one block for a price that only makes sense when someone is actually racing.
+
+A related error the same reasoning exposes: the cubic fee ladder escalates by *attempt index*,
+so in `window` mode the cheap early rungs are spent on premature attempts before the flip, and
+the expensive rungs arrive exactly when the contest starts. Escalation should key off attempts
+that fail **after** maturity, not off a counter. Not yet fixed.
+
+---
+
 ## Q17 — What a gas war actually costs, and the two delegation states
 
 ### Bidding: the multiplier was meaningless, the budget is not

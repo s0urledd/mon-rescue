@@ -384,6 +384,36 @@ async function main() {
 
     // burst or due. Everything from here is broadcast only.
     console.log(`\n[${a.phase}] ${a.reason}`);
+
+    // One well-timed attempt, or pre-queue across the window?
+    //
+    // The spray was designed when detection cost ~116ms over remote RPC. Beside a local node
+    // it is ~8ms — under 4% of a block — so "detect too slowly to react" is no longer the
+    // problem it was built for.
+    //
+    // What pre-queuing still buys is exactly ONE block: the epoch advances in transaction 0 of
+    // the flip block, so a transaction already in the leader's mempool is included in that same
+    // block and succeeds, whereas reacting can only reach block N+1. That is decisive only when
+    // the attacker reacts rather than pre-queues; if both pre-queue or both react, the fee
+    // decides and the spray bought nothing.
+    //
+    // It is not free: every premature attempt reverts and is charged its full gas limit, so
+    // covering the ~40-block uncertainty costs ~2 MON in burnt attempts. Default is therefore
+    // to react, and pre-queue only when told to.
+    const sprayMode = process.env.SPRAY_MODE ?? (a.phase === 'due' ? 'off' : 'window');
+    if (sprayMode === 'off') {
+      console.log(`firing a single attempt (SPRAY_MODE=off — reacting, not pre-queueing)`);
+      const single = attempts[0]!;
+      const t0 = Date.now();
+      const r = await broadcastEverywhere(CHAIN_ID, single.raw, urls);
+      console.log(`  nonce=${single.nonce} ${r.hash ?? 'REJECTED'} (${Date.now() - t0}ms)`);
+      if (r.hash) {
+        const receipt = await client.waitForTransactionReceipt({ hash: r.hash });
+        console.log(`  receipt ${receipt.status} in block ${receipt.blockNumber}`);
+        if (receipt.status === 'success') return finish('rescue landed.');
+      }
+      console.log(`single attempt did not land — escalating through the ladder`);
+    }
     const result = await spray({
       chainId: CHAIN_ID, client, attempts, urls,
       intervalMs: Math.round(SPRAY_BLOCKS_PER_ATTEMPT * SECONDS_PER_BLOCK * 1000),
