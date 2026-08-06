@@ -55,49 +55,72 @@ export async function scanUnstakes(
   fromBlock: bigint,
   toBlock: bigint,
 ): Promise<UnstakeEvent[]> {
-  const out: UnstakeEvent[] = [];
+  // Build every 100-block window first, then run them with bounded concurrency. Over a
+  // multi-day range that is thousands of calls, and sequentially it takes minutes — unusable
+  // in an emergency intake, where time-to-armed is the whole metric.
+  const windows: Array<[bigint, bigint]> = [];
   for (let start = fromBlock; start <= toBlock; start += MAX_LOG_RANGE) {
     const end = start + MAX_LOG_RANGE - 1n > toBlock ? toBlock : start + MAX_LOG_RANGE - 1n;
-    const logs = await client.getLogs({
-      address: STAKING_PRECOMPILE,
-      event: UNDELEGATE_EVENT,
-      args: { delegator },
-      fromBlock: start,
-      toBlock: end,
-    });
-    for (const log of logs) {
-      const a = log.args as {
-        validatorId?: bigint; delegator?: `0x${string}`; withdrawId?: number;
-        amount?: bigint; activationEpoch?: bigint;
-      };
-      if (a.validatorId === undefined || a.activationEpoch === undefined) continue;
-      out.push({
-        validatorId: a.validatorId,
-        delegator: getAddress(a.delegator ?? delegator),
-        withdrawId: Number(a.withdrawId ?? 0),
-        amount: a.amount ?? 0n,
-        activationEpoch: a.activationEpoch,
-        maturesAtEpoch: maturityEpoch(a.activationEpoch),
-        blockNumber: log.blockNumber ?? 0n,
-        txHash: (log.transactionHash ?? '0x') as `0x${string}`,
-      });
+    windows.push([start, end]);
+  }
+
+  const concurrency = Number(process.env.LOG_SCAN_CONCURRENCY ?? 24);
+  const out: UnstakeEvent[] = [];
+
+  for (let i = 0; i < windows.length; i += concurrency) {
+    const results = await Promise.all(
+      windows.slice(i, i + concurrency).map(([from, to]) =>
+        client
+          .getLogs({
+            address: STAKING_PRECOMPILE,
+            event: UNDELEGATE_EVENT,
+            args: { delegator },
+            fromBlock: from,
+            toBlock: to,
+          })
+          // One unlucky window must not abandon the whole scan; a missed range is better than
+          // no result, and the caller can widen the lookback if something looks absent.
+          .catch(() => []),
+      ),
+    );
+
+    for (const logs of results) {
+      for (const log of logs) {
+        const a = log.args as {
+          validatorId?: bigint; delegator?: `0x${string}`; withdrawId?: number;
+          amount?: bigint; activationEpoch?: bigint;
+        };
+        if (a.validatorId === undefined || a.activationEpoch === undefined) continue;
+        out.push({
+          validatorId: a.validatorId,
+          delegator: getAddress(a.delegator ?? delegator),
+          withdrawId: Number(a.withdrawId ?? 0),
+          amount: a.amount ?? 0n,
+          activationEpoch: a.activationEpoch,
+          maturesAtEpoch: maturityEpoch(a.activationEpoch),
+          blockNumber: log.blockNumber ?? 0n,
+          txHash: (log.transactionHash ?? '0x') as `0x${string}`,
+        });
+      }
     }
   }
-  return out;
+
+  return out.sort((x, y) => (x.blockNumber < y.blockNumber ? -1 : 1));
 }
 
 /**
  * Discover a delegator's unstakes by walking backwards from the head until enough history is
  * covered.
  *
- * `lookbackBlocks` defaults to roughly three epochs, which is the longest a withdrawal can be
- * pending: anything older has either matured and been claimed, or is not ours to find. Scanning
- * further is wasted requests against a 100-block-per-call cap.
+ * `lookbackBlocks` defaults to ~700,000 blocks — about 14 epochs, or two and a half days at the
+ * measured cadence. The earlier 160,000 (~13 hours) assumed a withdrawal is claimed promptly
+ * after maturing, and it silently missed a position that had been pending for two days. That is
+ * exactly the case an emergency intake must handle: nobody arrives on time.
  */
 export async function discoverUnstakes(
   client: PublicClient,
   delegator: `0x${string}`,
-  lookbackBlocks = 160_000n,
+  lookbackBlocks = BigInt(process.env.UNSTAKE_LOOKBACK_BLOCKS ?? 700_000),
 ): Promise<UnstakeEvent[]> {
   const head = await client.getBlockNumber();
   const from = head > lookbackBlocks ? head - lookbackBlocks : 0n;
