@@ -145,3 +145,71 @@ export function maxSpendPerAttemptFromEnv(): bigint {
   }
   return BigInt(Math.round(parsed * 1e6)) * 10n ** 12n;
 }
+
+/**
+ * An ascending fee schedule across spray attempts.
+ *
+ * Two things are true at once: being comfortably above ordinary traffic is enough most of the
+ * time, and if there *is* a gas war we are willing to spend far more. A single fee cannot
+ * express both, and picking one means either overpaying every uncontested rescue or losing
+ * every contested one.
+ *
+ * So the attempts escalate. The first sits just above the p90 of live bids — cheap, and enough
+ * to beat anyone using default fees. Later ones climb toward the per-attempt budget. Because
+ * `spray()` checks whether the rescue has landed before each attempt, an early cheap success
+ * stops the ladder before the expensive rungs are ever broadcast.
+ *
+ * Every rung is signed up front, so escalation costs nothing in the hot path — the flip window
+ * still does nothing but broadcast.
+ *
+ * Note these use CONSECUTIVE nonces, not a shared one. Same-nonce replacement is undocumented
+ * on Monad (see FINDINGS), so relying on it to supersede a cheaper attempt would be building on
+ * an assumption. Independent nonces mean a landed early attempt simply ends the sequence.
+ */
+export function feeSchedule(
+  observed: ObservedFees,
+  gasLimit: bigint,
+  maxSpendPerAttempt: bigint,
+  attempts: number,
+): FeePlan[] {
+  if (attempts <= 0) return [];
+
+  // Opening bid: above the p90 of live traffic, with a floor so a quiet chain still gets a
+  // meaningful tip rather than matching the 2 gwei default everyone else sends.
+  const opening = observed.p90Priority > 0n
+    ? observed.p90Priority * 2n
+    : observed.baseFeePerGas / 2n;
+
+  const affordableTotal = maxSpendPerAttempt / gasLimit;
+  const ceiling = affordableTotal > observed.baseFeePerGas
+    ? affordableTotal - observed.baseFeePerGas
+    : 0n;
+
+  const top = opening > ceiling ? ceiling : opening;
+
+  const plans: FeePlan[] = [];
+  for (let i = 0; i < attempts; i++) {
+    // Cubic climb, not linear. Most rescues are uncontested, so most attempts should cost
+    // almost nothing; a linear ramp reaches half the budget by the middle of the sequence and
+    // spends heavily on fights that are not happening. Cubed progress keeps the first half
+    // cheap and concentrates the escalation at the tail, where the evidence of a real contest
+    // is that nothing has landed yet.
+    const progress = attempts === 1 ? 1 : i / (attempts - 1);
+    const curved = progress * progress * progress;
+    const scaled = top + ((ceiling - top) * BigInt(Math.round(curved * 10_000))) / 10_000n;
+    const maxPriorityFeePerGas = scaled < ceiling ? scaled : ceiling;
+    const maxFeePerGas = observed.baseFeePerGas * 3n + maxPriorityFeePerGas;
+    const costPerAttempt = gasLimit * (observed.baseFeePerGas + maxPriorityFeePerGas);
+    const overtopBy = observed.maxPrioritySeen > 0n
+      ? Number((maxPriorityFeePerGas * 100n) / observed.maxPrioritySeen) / 100
+      : Infinity;
+    plans.push({
+      maxFeePerGas,
+      maxPriorityFeePerGas,
+      costPerAttempt,
+      overtopBy,
+      explanation: `${maxPriorityFeePerGas / 1_000_000_000n} gwei tip, ${formatEther(costPerAttempt)} MON`,
+    });
+  }
+  return plans;
+}

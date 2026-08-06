@@ -23,7 +23,7 @@ import {
   watchGuardianBalance, GUARDIAN_INFLIGHT_FLOOR,
 } from './preflight.js';
 import { selectAuthorizations, validateWindow, assessWindow, type AuthorizationWindow } from './authorization.js';
-import { observeFees, planFee, maxSpendPerAttemptFromEnv } from './fees.js';
+import { observeFees, planFee, feeSchedule, maxSpendPerAttemptFromEnv } from './fees.js';
 import { isAbsolute, resolve } from 'node:path';
 
 /**
@@ -213,7 +213,8 @@ async function main() {
   const gas = BigInt(process.env.GAS_LIMIT ?? gasEstimate.gasLimit);
   console.log(`\ngas limit ${gas}`);
   if (!process.env.GAS_LIMIT) console.log(`  ${gasEstimate.breakdown}`);
-  const feePlan = planFee(observed, gas, maxSpendPerAttemptFromEnv());
+  const maxSpendPerAttempt = maxSpendPerAttemptFromEnv();
+  const feePlan = planFee(observed, gas, maxSpendPerAttempt);
   const maxFeePerGas = feePlan.maxFeePerGas;
   const maxPriorityFeePerGas = feePlan.maxPriorityFeePerGas;
   console.log(`fee: ${feePlan.explanation}`);
@@ -303,13 +304,24 @@ async function main() {
 
   console.log(`pre-signing ${attemptCount} attempt(s) from nonce ${baseNonce}...`);
   const t0 = Date.now();
+  // Ascending fees across the sequence: cheap enough to be free when uncontested, climbing to
+  // the authorised budget if nothing lands. spray() stops as soon as the rescue succeeds, so
+  // the expensive rungs are only ever broadcast in a real fight.
+  const schedule = feeSchedule(observed, gas, maxSpendPerAttempt, attemptCount);
+  console.log(
+    `fee ladder: ${schedule[0]!.explanation} -> ${schedule[schedule.length - 1]!.explanation}`,
+  );
+
   const attempts: SprayAttempt[] = [];
   for (let i = 0; i < attemptCount; i++) {
+    const step = schedule[i]!;
     attempts.push({
       nonce: baseNonce + i,
       raw: await wallet.signTransaction({
         to: victim, data, nonce: baseNonce + i, gas,
-        maxFeePerGas, maxPriorityFeePerGas, chain,
+        maxFeePerGas: step.maxFeePerGas,
+        maxPriorityFeePerGas: step.maxPriorityFeePerGas,
+        chain,
         ...(authorizationList ? { authorizationList } : {}),
       } as never),
     });
