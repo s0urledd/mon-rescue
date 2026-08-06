@@ -512,6 +512,58 @@ Two further constraints that bite the hot path specifically:
 
 ---
 
+## Q15 — The first firing: it fired, and ran out of gas
+
+2026-08-06, epoch 1029, against the three positions matured at 1019.
+
+**The mechanism worked.** Positions were discovered from the `Undelegate` events with no manual
+input, the reserve floor computed correctly (5.04 MON stranded, 500 MON sweepable), 31 attempts
+were pre-signed in **118ms**, and the spray broadcast 17 of them at 69–197ms each. The hot path
+did exactly what it was designed to do.
+
+**Every transaction reverted.** `gasUsed = 350000/350000` — the whole limit consumed, nothing
+produced. Replaying the call returns `out of gas`.
+
+### Cause
+
+The gas limit was a fixed 350,000, chosen because Monad charges the limit rather than the usage
+so a tight limit saves money. That reasoning is sound and the number was never checked against
+what the work costs. Documented precompile costs:
+
+| function | gas |
+|---|---|
+| `withdraw(uint64,uint8)` | 68,675 |
+| `claimRewards(uint64)` | 155,375 |
+
+Three positions with rewards is `3 x 224,050 = 672,150` before base cost, calldata, contract
+overhead and the sweep — about **776,000**. The limit was less than half of it.
+
+Worse, the contract's own `WITHDRAW_GAS_CAP` is 400,000, **larger than the entire transaction
+limit**. The first inner call alone tried to forward more gas than the transaction had.
+
+### Why it produced nothing rather than partial results
+
+The staking precompile consumes all gas on a failed call. There is no partial rescue to salvage
+from an under-sized limit — the attempt is simply lost, at full cost, and being short is fatal
+while being long only costs the difference.
+
+### Fixed
+
+`estimateRescueGas(positionCount, claimRewards)` sizes the limit from the actual work with a
+25% margin. One position needs ~373k, three ~970k, five ~1.57M. `GAS_LIMIT` still overrides.
+
+### A second finding, from the same numbers
+
+`claimRewards` is 155,375 gas per position — **70% of the per-position cost**. In this run the
+delegator held 0.263 MON of unclaimed rewards; claiming it across three positions costs roughly
+1.1 MON in gas at a 20x multiplier. Claiming was a net loss of about 0.8 MON.
+
+Rewards accrued *to the withdrawal itself* are paid by `withdraw()` regardless, so this only
+governs the separate delegator reward pot. `rewardsWorthClaiming()` now makes it a decision
+rather than a default, and skipping it more than halves the gas requirement.
+
+---
+
 ## Q14 — The first live rescue attempt failed, and how it failed matters more than that it did
 
 On 2026-08-04 the hot path was armed against 500 MON maturing at epoch 1019, launched under

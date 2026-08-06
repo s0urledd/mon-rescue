@@ -12,14 +12,14 @@ import {
   isClaimable, maturityEpoch, isEmptySlot, advise, boundaryBlockFor,
   earliestStartBlockFor, latestStartBlockFor, localFirstClient, transportConfigFromEnv,
   detectLocalNode,
-  discoverUnstakes, validatorIdsFrom,
+  discoverUnstakes, validatorIdsFrom, estimateRescueGas,
 } from '@monrescue/shared';
 import { MONRESCUE_ABI } from './abi.js';
 import { broadcastEverywhere } from './broadcast.js';
 import { spray, makeSafeBalanceChecker, type SprayAttempt } from './strategies.js';
 import { watchAccount, delegationTarget } from './guard.js';
 import {
-  preflight, gasBudgetFromEnv, attemptsAffordable, DEFAULT_RESCUE_GAS_LIMIT,
+  preflight, gasBudgetFromEnv, attemptsAffordable,
   watchGuardianBalance, GUARDIAN_INFLIGHT_FLOOR,
 } from './preflight.js';
 import { selectAuthorizations, validateWindow, assessWindow, type AuthorizationWindow } from './authorization.js';
@@ -198,7 +198,15 @@ async function main() {
   // a floor to multiply up from, not a recommendation to trust.
   const fees = await client.estimateFeesPerGas();
   const multiplier = BigInt(process.env.PRIORITY_FEE_MULTIPLIER ?? 20);
-  const gas = BigInt(process.env.GAS_LIMIT ?? DEFAULT_RESCUE_GAS_LIMIT);
+  // Size the gas limit from the work, not from a fixed default. The previous fixed 350k was
+  // chosen for frugality and never checked against the precompile's documented costs; three
+  // positions need ~776k, so the transaction ran out of gas and consumed the entire limit
+  // producing nothing. Under-sizing is not a partial rescue, it is a total loss of the attempt.
+  const claimRewardsToo = (process.env.CLAIM_REWARDS ?? 'auto') !== 'false';
+  const gasEstimate = estimateRescueGas(batch.length, claimRewardsToo);
+  const gas = BigInt(process.env.GAS_LIMIT ?? gasEstimate.gasLimit);
+  console.log(`\ngas limit ${gas}`);
+  if (!process.env.GAS_LIMIT) console.log(`  ${gasEstimate.breakdown}`);
   const maxFeePerGas = (fees.maxFeePerGas ?? 100_000_000_000n) * multiplier;
   const maxPriorityFeePerGas = (fees.maxPriorityFeePerGas ?? 2_000_000_000n) * multiplier;
   const budget = gasBudgetFromEnv();
@@ -268,7 +276,7 @@ async function main() {
   const data = encodeFunctionData({
     abi: MONRESCUE_ABI,
     functionName: 'rescue',
-    args: [batch.map((p) => p.validatorId), batch.map((p) => p.withdrawId), true],
+    args: [batch.map((p) => p.validatorId), batch.map((p) => p.withdrawId), claimRewardsToo],
   });
 
   const baseNonce = await client.getTransactionCount({ address: guardian.address });

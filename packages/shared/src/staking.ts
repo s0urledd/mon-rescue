@@ -292,3 +292,73 @@ export const STAKING_ABI = [
     ],
   },
 ] as const;
+
+/**
+ * Documented gas cost of each staking precompile function.
+ *
+ * These are large — `claimRewards` alone is more than twice a plain `withdraw` — and they are
+ * what a rescue transaction's gas limit has to be sized against. A limit chosen for frugality
+ * rather than measured against these will simply run out, and because the precompile consumes
+ * all gas on failure there is no partial result to salvage.
+ */
+export const STAKING_GAS = {
+  delegate: 260_850n,
+  undelegate: 147_750n,
+  withdraw: 68_675n,
+  claimRewards: 155_375n,
+  compound: 289_325n,
+  getEpoch: 200n,
+  getWithdrawalRequest: 24_300n,
+} as const;
+
+export interface RescueGasEstimate {
+  gasLimit: bigint;
+  perPosition: bigint;
+  breakdown: string;
+}
+
+/**
+ * Size a rescue transaction's gas limit from the work it actually does.
+ *
+ * A fixed default cannot work: the cost scales with the number of positions being claimed, and
+ * an under-sized limit is not a partial rescue but a total loss of the attempt. Monad charges
+ * the limit rather than the usage, so this is deliberately close to the real requirement with a
+ * margin, not a round number chosen upward "to be safe".
+ */
+export function estimateRescueGas(positionCount: number, claimRewards: boolean): RescueGasEstimate {
+  const n = BigInt(Math.max(1, positionCount));
+  const perPosition = STAKING_GAS.withdraw + (claimRewards ? STAKING_GAS.claimRewards : 0n);
+  const calls = n * perPosition;
+  const baseTx = 21_000n;
+  const calldata = 8_000n;      // arrays of validator ids and slots
+  const contract = 15_000n * n; // loop, event emission, balance bookkeeping
+  const sweep = 30_000n;        // native transfer plus the reserve-floor arithmetic
+  const subtotal = baseTx + calldata + calls + contract + sweep;
+  // 25% margin: the precompile consumes all gas on a failed call, so being short is fatal
+  // while being long only costs the difference.
+  const gasLimit = (subtotal * 125n) / 100n;
+  return {
+    gasLimit,
+    perPosition,
+    breakdown:
+      `${positionCount} position(s) x ${perPosition} + base ${baseTx} + calldata ${calldata} + ` +
+      `contract ${contract} + sweep ${sweep} = ${subtotal}, +25% margin -> ${gasLimit}`,
+  };
+}
+
+/**
+ * Whether claiming rewards is worth what it costs.
+ *
+ * `claimRewards` is 155,375 gas per position, more than twice a `withdraw`. Claiming 0.26 MON of
+ * rewards across three positions costs about 1.1 MON in gas at a 20x fee multiplier — a net
+ * loss. Rewards accrued *to the withdrawal itself* are paid by `withdraw()` regardless; this
+ * only governs the separate delegator reward pot.
+ */
+export function rewardsWorthClaiming(
+  unclaimedRewards: bigint,
+  positionCount: number,
+  gasPrice: bigint,
+): boolean {
+  const cost = STAKING_GAS.claimRewards * BigInt(Math.max(1, positionCount)) * gasPrice;
+  return unclaimedRewards > cost;
+}
