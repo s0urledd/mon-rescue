@@ -197,7 +197,18 @@ async function main() {
     (guardianBalance < GUARDIAN_INFLIGHT_FLOOR ? guardianBalance : GUARDIAN_INFLIGHT_FLOOR) /
       (gas * maxFeePerGas),
   );
-  const attemptCount = Math.max(1, Math.min(affordable, 64));
+  // Cap by what the guardian can actually pay, not only by the configured budget. Aborting
+  // because the budget is larger than the balance is the wrong call: it refuses to attempt a
+  // rescue it could still make, just with fewer shots. Keep a margin so the last attempt is
+  // not the one that empties the account mid-flight.
+  const affordableByBalance = Number((guardianBalance * 9n) / (10n * gas * maxFeePerGas));
+  const attemptCount = Math.max(1, Math.min(affordable, affordableByBalance, 64));
+  if (affordableByBalance < affordable) {
+    console.log(
+      `\nguardian balance caps this at ${attemptCount} attempt(s) ` +
+        `(budget alone would allow ${Math.min(affordable, 64)}).`,
+    );
+  }
 
   const pf = await preflight({
     client, guardian: guardian.address, victim, gas, maxFeePerGas, plannedAttempts: attemptCount,
