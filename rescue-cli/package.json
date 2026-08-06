@@ -8,8 +8,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "arm": "tsx src/index.ts",
-    "emergency": "tsx src/emergency.ts"
+    "arm": "pnpm --filter @monrescue/shared build && tsx src/index.ts",
+    "emergency": "pnpm --filter @monrescue/shared build && tsx src/emergency.ts"
   },
   "dependencies": {
     "@monrescue/shared": "workspace:*",

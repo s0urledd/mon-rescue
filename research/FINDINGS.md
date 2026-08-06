@@ -512,6 +512,59 @@ Two further constraints that bite the hot path specifically:
 
 ---
 
+## Q14 — The first live rescue attempt failed, and how it failed matters more than that it did
+
+On 2026-08-04 the hot path was armed against 500 MON maturing at epoch 1019, launched under
+`nohup`, and left for two days. At epoch 1029 the on-chain state read:
+
+| | |
+|---|---|
+| safe address | 4.8064518194 MON — **identical to baseline**, nothing delivered |
+| guardian | 29.997805757624869204 MON — **identical to the wei**, so it never sent a transaction |
+| positions | all three still pending, 500 MON, matured at 1019 and unclaimed |
+
+The cause was not a crash under load, a reorg, or a lost race. The process died **in the first
+second**, on an import:
+
+```
+SyntaxError: The requested module '@monrescue/shared' does not provide an export
+named 'detectLocalNode'
+```
+
+A `git pull` updated the source of `packages/shared` but nothing rebuilt its `dist/`. The
+consuming packages import from the built output, so they loaded a stale module that predated
+the export they needed.
+
+### Why this is worth a finding rather than a changelog line
+
+**Nothing reported it.** Not the process, which had already exited; not the guardian balance,
+which never moved; not any alert. The failure was indistinguishable from "armed and waiting"
+for two days, and was only caught by reading chain state and asking why the guardian's balance
+was unchanged to the wei.
+
+This is precisely the failure mode `STRATEGY.md` names as the one that silently loses a rescue —
+"our node being down, lagging, restarting or rate-limiting at the unlock block … not detectable
+from inside the process". It arrived on the very first live attempt, and from a direction not
+anticipated: not infrastructure, but a build artifact.
+
+### What changed
+
+- Every run script in `research`, `rescue-cli` and `watcher` now rebuilds `@monrescue/shared`
+  before executing. Startup cost is irrelevant for a daemon that waits hours; a stale `dist`
+  that dies on import is not.
+- `nohup` is not supervision. Production needs `systemd` with `Restart=always`, plus a
+  heartbeat that is visible from **outside** the process — because a process that is not running
+  cannot tell you it is not running.
+
+### What was not lost
+
+Withdrawal requests do not expire. The 500 MON stayed claimable at epoch 1019 and was still
+claimable at 1029, ten epochs later. On a real compromise the attacker would have taken it; in
+this test nobody was competing. That the funds survived is luck, not design, and does not
+soften the lesson.
+
+---
+
 ## Q13 — What multi-endpoint broadcast actually buys
 
 Worth recording because I got this wrong twice, in opposite directions.
