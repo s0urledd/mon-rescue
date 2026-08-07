@@ -356,7 +356,13 @@ export function estimateRescueGas(positionCount: number, claimRewards: boolean):
   const baseTx = 21_000n;
   const calldata = 4_000n;      // arrays of validator ids and slots
   const contract = 6_000n * n;  // loop, event emission, balance bookkeeping (measured ~15k total for 3)
-  const sweep = 12_000n;        // native transfer to an EOA measured at ~0 plus the floor arithmetic
+  // Sweep overhead is larger than an Ethereum intuition suggests. Monad prices COLD ACCOUNT
+  // ACCESS at 10,100 gas against Ethereum's 2,600 (docs: developer-essentials/opcode-pricing),
+  // and the sweep's call to SAFE_ADDRESS is always cold. Binary search against the live contract
+  // put the minimum working limit for a failing single-position rescue at 145,543, i.e. 45,543
+  // above the 100,000 the failed withdraw consumes — so the non-call overhead is ~45.5k, not the
+  // ~37k the Ethereum-priced components would predict.
+  const sweep = 20_000n;
   const subtotal = baseTx + calldata + calls + contract + sweep;
   // 25% margin on top. Monad charges the limit rather than the usage, so a generous limit costs
   // real money on every attempt — but being short does not cost the difference, it costs the

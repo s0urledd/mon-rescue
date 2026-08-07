@@ -628,6 +628,51 @@ And a fourth, in the CLI: `positionsGone()` checked only whether the withdrawal 
 empty, so it reported "the funds left without us" while 114.97 MON sat on the EOA. An empty slot
 plus a live balance is not a loss — it is precisely what `sweep()` is for. It now checks both.
 
+### Measured floor, and what it proves
+
+Binary search against the redeployed contract, `eth_call` at descending limits, with slot 0 empty
+so `withdraw()` fails — the exact shape of the epoch 1035 failure:
+
+| case | minimum working gas limit |
+|---|---|
+| validator 40, empty slot, `claimRewards=true` | **145,543** |
+| validator 40, empty slot, `claimRewards=false` | **145,543** |
+| validator 1, no delegation at all, `claimRewards=true` | **145,543** |
+
+Identical in all three, which is itself the confirmation. `rescue()` does `continue` when a
+withdraw fails, so `claimRewards` is never reached and the flag cannot matter. And
+145,543 − 100,000 (the withdraw cap, consumed in full) = **45,543** of fixed overhead.
+
+So the failed call does consume everything forwarded to it, exactly as the docs say — the old
+400,000 cap simply meant "everything" was the whole transaction.
+
+### Checked against the documentation, at last
+
+The gas model had been assembled from measurement and one remembered sentence. Reading
+`docs.monad.xyz` properly confirms all of it and adds three things worth having:
+
+| claim | source | verdict |
+|---|---|---|
+| `gas_paid = gas_limit × price_per_gas` | gas-pricing | confirmed |
+| *"calls with invalid arguments consume all gas"* | staking/api | confirmed, and it is the whole bug |
+| documented costs: withdraw 68,675, claimRewards 155,375, undelegate 147,750, delegate 260,850 | staking/api | match our traces exactly |
+| sender may dip by `gas_price × gas_limit` | reserve-balance | confirmed, now with the formula |
+| inflight budget `min(user_reserve_balance, lagged balance)` over `k` blocks | reserve-balance | confirmed |
+| minimum base fee 100 MON-gwei | gas-pricing | confirmed |
+| ordering by descending total gas price | gas-pricing | confirmed |
+
+**New, and it changes an estimate.** Monad prices **cold account access at 10,100 gas against
+Ethereum's 2,600**, and cold storage at 8,100 against 2,100; warm access is unchanged. Memory
+expansion is linear (`w/2`) rather than quadratic. The sweep's call to `SAFE_ADDRESS` is always
+cold, so the non-call overhead is ~45.5k rather than the ~37k an Ethereum-priced breakdown
+predicts — which is precisely the gap the binary search found. `estimateRescueGas` now carries
+the measured number.
+
+**New, and it is a trap we happen to avoid.** *"If an account attempts to delegate to the staking
+precompile using EIP-7702, all calls to it will revert."* We delegate to MonRescue, never to
+`0x…1000`, so this does not bite — but a design that tried to shortcut through a direct
+delegation would brick the account silently.
+
 ### The pattern, again
 
 This is the fifth time a number chosen for frugality sat on a path where being short loses

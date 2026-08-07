@@ -85,7 +85,12 @@ input is signatures made in their own wallet.
 | Maturity | `withdrawEpoch + WITHDRAWAL_DELAY` |
 | `withdraw()` gas | exactly **68,675** |
 | `gasUsed` in a receipt | **always equals the limit** — carries no information about consumption |
-| Failed precompile call | consumes **everything forwarded**, so a gas cap above the tx limit caps nothing |
+| Sender's gas allowance | `gas_price × gas_limit` (docs, verbatim) |
+| Failed precompile call | *"calls with invalid arguments consume all gas"* — a cap above the tx limit caps nothing |
+| Cold account access | **10,100 gas** (Ethereum: 2,600). Cold storage 8,100 (2,100). Warm unchanged |
+| Memory expansion | linear `w/2`, not Ethereum's quadratic |
+| Inflight gas budget | `min(user_reserve_balance, lagged balance)` over `k` blocks — docs confirm |
+| 7702-delegating **to the staking precompile** | *"all calls to it will revert"* — never do this |
 | `claimRewards()` gas | 155,375 — **70% of per-position cost**, usually not worth it |
 | Sweep to an EOA | ~0 gas |
 | Reserve floor | `min(balance at start, 10 MON)` — strands only what was already there |
