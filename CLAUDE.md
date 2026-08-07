@@ -45,6 +45,20 @@ That is not a caveat — it is the whole problem.
 **Nobody registers before being hacked.** The primary flow is reactive: the user arrives already
 compromised. The unbonding delay (2–3 epochs, 8–13h) is what makes that survivable.
 
+**Two arrival states, both covered.** The attacker may not have touched the Monad position yet —
+a wallet is often drained on another chain first, and that is when the user notices. So:
+
+| on arrival | what we do |
+|---|---|
+| already unbonding | arm for the maturity epoch we read off their `Undelegate` |
+| still actively staked | `startUnbonding()` ourselves, then arm |
+
+Do **not** wait for the attacker to unstake when the stake is still active. Waiting hands them
+three choices that are ours to take: **the moment** the contested block falls, **the slot count**
+(each slot needs its own `withdraw()`; 256 of them puts one attempt at ~35 MON against a
+`min(10 MON, balance)` inflight cap and collapses the spray to a single shot), and **the
+boundary** (before it activates at n+1, at or after it n+2 — a full epoch, ~4.2h).
+
 ## The one thing that must never break
 
 `SAFE_ADDRESS` is immutable, set at construction, one contract instance per user. **No function
@@ -94,8 +108,16 @@ cost. Being long only costs the difference. `estimateRescueGas()` sizes from pos
 
 **Fees are a MON budget per attempt, not a multiplier.** `eth_maxPriorityFeePerGas` returns a
 hardcoded 2 gwei on Monad, so a multiplier over it scaled a constant that measured nothing.
-`observeFees()` samples real bids; `feeSchedule()` climbs on a cubic curve so uncontested
-rescues stay near-free and a real fight reaches the authorised budget.
+`observeFees()` samples real bids.
+
+**The window is priced flat, well above the average — not above the outlier.** Every window
+attempt could be the one in the flip block, so they all bid the same; a ramp just randomises
+what we pay at the decisive block. The anchor is `p90 × 10`: hundreds of times the median, and
+a full window lands at **10–20 MON** on observed mainnet traffic. Anchoring on the observed
+*maximum* was tried and took the window to 93 MON, which prices the uncontested majority off a
+single outlier. Escalation rungs handle a genuine top bidder, and only fire after the window
+failed — the first real evidence anyone is racing. Operator's ceiling: 100–200 MON is
+acceptable, 10–20 is the target. **Minimum gas is never the priority.**
 
 **Pre-queue by default when waiting for a flip.** The epoch advances in tx 0 of the flip block,
 so a transaction already in a leader's mempool lands in that block; reacting reaches only N+1.

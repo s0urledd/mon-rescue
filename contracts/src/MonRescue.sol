@@ -54,6 +54,8 @@ contract MonRescue {
     event Rescued(address indexed safeAddress, uint256 amount, uint256 validatorCount);
     event WithdrawFailed(uint64 indexed validatorId, bytes reason);
     event ClaimFailed(uint64 indexed validatorId, bytes reason);
+    event UnbondStarted(uint64 indexed validatorId, uint256 amount, uint8 withdrawId);
+    event UnbondFailed(uint64 indexed validatorId, bytes reason);
 
     /**
      * @param safeAddress Destination for every rescue. Cannot be changed afterwards.
@@ -164,6 +166,84 @@ contract MonRescue {
      */
     function sweep() external {
         _sweep(address(this).balance, 0);
+    }
+
+    /**
+     * @notice Start unbonding the account's entire active stake, one withdrawal slot per
+     * validator.
+     *
+     * @dev For the case where the user reaches us while their stake is still ACTIVE — their
+     * wallet is compromised (assets already taken on other chains, say) but nobody has touched
+     * the Monad position yet.
+     *
+     * Waiting for the attacker to unstake looks acceptable because their Undelegate event
+     * starts our clock either way. It is not, and the reason is that waiting hands them three
+     * choices that are ours to take:
+     *
+     *  1. **The moment.** They pick when the clock starts, so they pick when the contested block
+     *     falls. We would rather it fell when we are armed and funded.
+     *  2. **The slot count.** `withdrawId` is theirs to choose, and each slot needs its own
+     *     `withdraw()` call. Fifty slots multiplies our per-attempt cost 13x; at the 256 maximum
+     *     one attempt costs ~35 MON and collides with the inflight gas budget, collapsing the
+     *     spray to a single shot. Undelegating first takes exactly one slot per validator.
+     *  3. **The boundary.** An undelegate landing before the boundary block activates at n+1;
+     *     one landing at or after it activates at n+2. That is a full epoch — about 4.2 hours —
+     *     and it is the largest single lever on the clock. We can aim for it; they can aim for
+     *     the other side of it.
+     *
+     * Unbonding does not move funds, so the destination lock is untouched: the stake matures
+     * into a withdrawal request payable to `msg.sender`, which under delegation is this account,
+     * and the only exit from this account remains `_sweep` to `SAFE_ADDRESS`. Even if the
+     * attacker calls `withdraw()` themselves at maturity, the precompile pays this account and
+     * they need a second transaction to move it — which is the race `rescue()` wins in one.
+     *
+     * Permissionless for the same reason as `rescue()`. It grants an attacker nothing they do
+     * not already have: holding the seed, they can call the precompile directly and split slots
+     * however they like. What it costs to restrict is a rescue that cannot start because our
+     * key is the one that is offline.
+     *
+     * @param validatorIds Validators whose active stake should be unbonded.
+     * @param withdrawId Slot to use for every validator. One slot each is not about the bill —
+     * it is about how many shots we get. Monad caps an account's inflight gas at
+     * min(10 MON, balance) over 3 blocks, so every extra slot enlarges each attempt and fewer
+     * attempts fit inside that cap. Slot count buys attempts, not savings. Pick a free slot.
+     * @return started Number of validators for which unbonding was successfully requested.
+     */
+    function startUnbonding(uint64[] calldata validatorIds, uint8 withdrawId)
+        external
+        returns (uint256 started)
+    {
+        for (uint256 i = 0; i < validatorIds.length; i++) {
+            uint64 valId = validatorIds[i];
+
+            // Only ACTIVATED stake can be undelegated, and `stake` is exactly that field. A
+            // delegation made this epoch reads as 0 here and undelegating it would revert,
+            // consuming the whole gas limit — so read first rather than discover on-chain.
+            (bool gotIt, bytes memory data) = STAKING_PRECOMPILE.call{gas: WITHDRAW_GAS_CAP}(
+                abi.encodeWithSignature("getDelegator(uint64,address)", valId, address(this))
+            );
+            if (!gotIt || data.length < 32) {
+                emit UnbondFailed(valId, data);
+                continue;
+            }
+            uint256 activeStake = abi.decode(data, (uint256));
+            if (activeStake == 0) {
+                emit UnbondFailed(valId, bytes("no active stake"));
+                continue;
+            }
+
+            (bool ok, bytes memory reason) = STAKING_PRECOMPILE.call{gas: WITHDRAW_GAS_CAP}(
+                abi.encodeWithSignature(
+                    "undelegate(uint64,uint256,uint8)", valId, activeStake, withdrawId
+                )
+            );
+            if (ok) {
+                started++;
+                emit UnbondStarted(valId, activeStake, withdrawId);
+            } else {
+                emit UnbondFailed(valId, reason);
+            }
+        }
     }
 
     /**

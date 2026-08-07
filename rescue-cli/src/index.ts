@@ -8,7 +8,8 @@ import type { SignedAuthorization } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { readFileSync } from 'node:fs';
 import {
-  chainById, RPC_POOL, getEpoch, getWithdrawalRequest, planSweep, assertSweepAllowed,
+  chainById, RPC_POOL, getEpoch, getWithdrawalRequest, getDelegator, undelegateTiming,
+  planSweep, assertSweepAllowed,
   isClaimable, maturityEpoch, isEmptySlot, advise, boundaryBlockFor,
   earliestStartBlockFor, latestStartBlockFor, sprayStartBlockFor,
   localFirstClient, transportConfigFromEnv,
@@ -184,7 +185,71 @@ async function main() {
       });
     }
   }
-  if (positions.length === 0) throw new Error('no pending withdrawals found for those validators');
+  if (positions.length === 0) {
+    // No withdrawal requests. If there is still ACTIVE stake, nobody has started the clock —
+    // the user reached us before the attacker touched the Monad position, which happens when
+    // the compromise showed up somewhere else first.
+    //
+    // Waiting for the attacker to unstake looks acceptable because their event starts our clock
+    // either way. It is not: waiting hands them the moment, the slot count, and the boundary.
+    // Slot count is the sharpest of the three — `withdrawId` is theirs to pick, each slot needs
+    // its own withdraw() call, and 256 of them puts one attempt at ~35 MON against a per-account
+    // inflight cap of min(10 MON, balance), which collapses the spray to a single shot. Starting
+    // it ourselves takes one slot per validator.
+    const active: { validatorId: bigint; stake: bigint }[] = [];
+    for (const validatorId of validatorIds) {
+      const d = await getDelegator(client, validatorId, victim);
+      if (d.stake > 0n) active.push({ validatorId, stake: d.stake });
+    }
+    if (active.length === 0) {
+      throw new Error('no pending withdrawals and no active stake found for those validators');
+    }
+
+    const total = active.reduce((a, p) => a + p.stake, 0n);
+    const timing = undelegateTiming(await getEpoch(client), await client.getBlockNumber());
+    console.log(
+      `\nno withdrawal requests, but ${formatEther(total)} MON is still actively staked ` +
+        `across ${active.length} validator(s). Nobody has started the clock.`,
+    );
+    console.log(
+      `  unbonding now activates at epoch ${timing.activationEpoch} and matures at ` +
+        `${timing.maturityEpoch}` +
+        (timing.missedThisBoundary
+          ? `  (the boundary for the earlier activation has passed — one extra epoch is unavoidable)`
+          : `  (${timing.blocksRemaining} block(s) left to beat the boundary at ` +
+            `${timing.deadlineBlock} and save a full epoch)`),
+    );
+
+    if ((process.env.START_UNBONDING ?? 'ask') !== 'yes') {
+      // Starting the clock is an on-chain action against the user's position with a real,
+      // irreversible consequence — their stake stops earning and enters a delay. Fire it
+      // deliberately, not as a side effect of running `arm`.
+      throw new Error(
+        `refusing to unbond without an explicit instruction. Re-run with START_UNBONDING=yes ` +
+          `to start the clock, then re-run arm to rescue at maturity.`,
+      );
+    }
+
+    const slot = Number(process.env.UNBOND_SLOT ?? 0);
+    console.log(`\nstarting unbonding into slot ${slot}...`);
+    const unbondData = encodeFunctionData({
+      abi: MONRESCUE_ABI,
+      functionName: 'startUnbonding',
+      args: [active.map((p) => p.validatorId), slot],
+    });
+    const hash = await wallet.sendTransaction({
+      to: victim, data: unbondData, gas: 200_000n * BigInt(active.length + 1), chain,
+    } as never);
+    const receipt = await client.waitForTransactionReceipt({ hash });
+    console.log(`  ${hash} -> ${receipt.status} in block ${receipt.blockNumber}`);
+    if (receipt.status !== 'success') {
+      throw new Error('startUnbonding reverted — check UNBOND_SLOT is free and stake is activated');
+    }
+    console.log(
+      `\nclock started. Re-run arm to arm the rescue for epoch ${timing.maturityEpoch}.`,
+    );
+    return;
+  }
 
   // Batch everything maturing at the earliest epoch into ONE rescue() call. Positions maturing
   // later need their own run — including them here would mean waiting for the latest and

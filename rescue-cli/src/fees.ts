@@ -172,12 +172,21 @@ export function maxSpendPerAttemptFromEnv(): bigint {
  *    (`latestStart` is an upper bound) and attempts are still failing. That is the first real
  *    evidence of a contest, as opposed to a counter running.
  *
- * The window fee anchors on the **p90** of observed bids, not the maximum. The max is an
- * outlier — measured at 1,482 gwei against a p90 of 78 — and paying 10x an outlier on every one
- * of ~20 window attempts would cost ~98 MON to cover a window that is usually uncontested. 10x
- * the p90 is ~0.29 MON per attempt, so a full window costs a few MON and still outbids anyone
- * not specifically racing us. The outlier is the right anchor for the escalation rungs, where we
- * have actual evidence someone is.
+ * The window fee is **well above the network average, not above its outlier**. Both extremes
+ * were tried and both are wrong:
+ *
+ *  - Anchoring on the observed maximum: a single 1,482 gwei bid in a 69-transaction sample took
+ *    the window to 93 MON. The window runs on every rescue, including the uncontested majority,
+ *    so an outlier in the sample should not set the price of the common case.
+ *  - Anchoring near the median: 2 gwei is what everyone sends by default, and matching it is
+ *    not a bid.
+ *
+ * `p90 x WINDOW_FEE_OVERTOP` (default 15) sits hundreds of times above the median and puts a
+ * full window in the **20-30 MON** band the operator has authorised as the standing default,
+ * against observed mainnet traffic. Minimum gas is never the priority — the position is — but
+ * the window is not where an unbounded bid belongs. Beating a genuine top bidder is what the
+ * escalation rungs are for, and they only fire once the window has failed to settle it, which
+ * is the first actual evidence that someone is racing.
  *
  * Every rung is signed up front, so none of this costs anything in the hot path.
  *
@@ -196,7 +205,7 @@ export function feeSchedule(
    * block and none should be priced to lose.
    */
   windowAttempts = attempts,
-  windowOvertop = BigInt(process.env.WINDOW_FEE_OVERTOP ?? 10),
+  windowOvertop = BigInt(process.env.WINDOW_FEE_OVERTOP ?? 15),
 ): FeePlan[] {
   if (attempts <= 0) return [];
 
@@ -205,8 +214,13 @@ export function feeSchedule(
     ? affordableTotal - observed.baseFeePerGas
     : 0n;
 
-  // Above the p90 of live traffic, with a floor so a quiet chain still gets a meaningful tip
-  // rather than matching the 2 gwei default that everyone else sends.
+  // Well above what the network is paying, measured against the p90 rather than the maximum.
+  // Anchoring on the maximum was tried and is wrong in the other direction: a single 1,482 gwei
+  // outlier in a 69-transaction sample dragged the whole window to 93 MON, and the window is the
+  // part that runs on every rescue including the uncontested ones. 10x the p90 puts a full
+  // window in the 10-20 MON range across observed mainnet traffic while still bidding hundreds
+  // of times the median. Beating a genuine top bidder is what the escalation rungs are for —
+  // they exist precisely for the case where the window did not settle it.
   const wanted = observed.p90Priority > 0n
     ? observed.p90Priority * windowOvertop
     : observed.baseFeePerGas / 2n;

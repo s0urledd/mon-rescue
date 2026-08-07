@@ -20,6 +20,16 @@ export const MONRESCUE_ABI = [
   },
   {
     type: 'function',
+    name: 'startUnbonding',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'validatorIds', type: 'uint64[]' },
+      { name: 'withdrawId', type: 'uint8' },
+    ],
+    outputs: [{ name: 'started', type: 'uint256' }],
+  },
+  {
+    type: 'function',
     name: 'sweepableAmount',
     stateMutability: 'view',
     inputs: [{ name: 'startingBalance', type: 'uint256' }],
@@ -46,6 +56,15 @@ export const MONRESCUE_ABI = [
       { name: 'safeAddress', type: 'address', indexed: true },
       { name: 'amount', type: 'uint256', indexed: false },
       { name: 'validatorCount', type: 'uint256', indexed: false },
+    ],
+  },
+  {
+    type: 'event',
+    name: 'UnbondStarted',
+    inputs: [
+      { name: 'validatorId', type: 'uint64', indexed: true },
+      { name: 'amount', type: 'uint256', indexed: false },
+      { name: 'withdrawId', type: 'uint8', indexed: false },
     ],
   },
 ] as const;
