@@ -9,7 +9,8 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "arm": "pnpm --filter @monrescue/shared build && tsx src/index.ts",
-    "emergency": "pnpm --filter @monrescue/shared build && tsx src/emergency.ts"
+    "emergency": "pnpm --filter @monrescue/shared build && tsx src/emergency.ts",
+    "sweep": "pnpm --filter @monrescue/shared build && tsx src/sweep.ts"
   },
   "dependencies": {
     "@monrescue/shared": "workspace:*",
