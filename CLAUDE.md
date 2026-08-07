@@ -136,7 +136,7 @@ belongs to the guardian; two customers maturing in the same epoch would split on
 
 ## The recurring mistake — check for it
 
-**Four times** a default was set for frugality on a path where being short is fatal and being
+**Five times** a default was set for frugality on a path where being short is fatal and being
 long merely costs money:
 
 1. A 350k gas limit that lost an entire rescue attempt
