@@ -292,7 +292,20 @@ async function main() {
   const gasEstimate = estimateRescueGas(batch.length, claimRewardsToo);
   const gas = BigInt(process.env.GAS_LIMIT ?? gasEstimate.gasLimit);
   console.log(`\ngas limit ${gas}`);
-  if (!process.env.GAS_LIMIT) console.log(`  ${gasEstimate.breakdown}`);
+  console.log(`  ${gasEstimate.breakdown}`);
+  if (gas < gasEstimate.gasLimit) {
+    // Refuse rather than warn. A GAS_LIMIT below the estimate is not a preference — it is the
+    // failure that lost the epoch 1035 battle test, and it is invisible when it happens: the
+    // transaction is accepted, mined, charged in full, and reverts with `out of gas`, which on
+    // Monad is indistinguishable from losing the race because the receipt reports the limit as
+    // gasUsed either way. Being long costs the difference; being short costs the position.
+    throw new Error(
+      `GAS_LIMIT=${gas} is below the computed requirement of ${gasEstimate.gasLimit}.\n` +
+        `  A failing precompile call consumes everything forwarded to it, so an under-sized\n` +
+        `  limit does not produce a partial rescue — it produces nothing, at full cost.\n` +
+        `  Remove GAS_LIMIT from the environment to use the computed value, or set it higher.`,
+    );
+  }
   const maxSpendPerAttempt = maxSpendPerAttemptFromEnv();
   const feePlan = planFee(observed, gas, maxSpendPerAttempt);
   const maxFeePerGas = feePlan.maxFeePerGas;
@@ -452,10 +465,16 @@ async function main() {
   /**
    * Is there still anything to rescue?
    *
-   * The only honest reason to stop trying is that the withdrawal requests no longer exist —
-   * someone claimed them, and since the safe address did not grow, that someone was the
-   * attacker. While any slot still holds a request the money is still claimable and stopping
-   * would be a decision to lose it.
+   * Two places the money can be, and an earlier version of this only looked at one.
+   *
+   *  1. Still in a withdrawal slot — claimable by `rescue()`.
+   *  2. Already withdrawn INTO the victim EOA — claimable by `sweep()`.
+   *
+   * Checking only the slots reads "attacker claimed it" as "the funds are gone", when in fact
+   * their `withdraw()` pays `msg.sender`, which is this account, which is still delegated to a
+   * destination-locked contract. That is not a loss; it is the exact state `sweep()` exists
+   * for. At the epoch 1035 battle test this check declared defeat with 114.97 MON sitting on
+   * the EOA, recoverable by a single call.
    *
    * A failed read returns false: not knowing is not evidence that the position is gone, and the
    * cost of one more attempt is gas while the cost of quitting early is the position.
@@ -465,6 +484,16 @@ async function main() {
       for (const p of batch) {
         const r = await getWithdrawalRequest(client, p.validatorId, victim, p.withdrawId);
         if (!isEmptySlot(r.withdrawalAmount, r.withdrawEpoch)) return false;
+      }
+      // Slots are empty. Is there a sweepable balance sitting on the account?
+      const bal = await client.getBalance({ address: victim });
+      if (planSweep(bal, 0n).sweepable > 0n) {
+        console.log(
+          `  slots are empty but ${formatEther(planSweep(bal, 0n).sweepable)} MON is sweepable ` +
+            `on the victim — someone withdrew into the account. Run: ` +
+            `pnpm --filter @monrescue/rescue-cli sweep`,
+        );
+        return false;
       }
       return true;
     } catch {

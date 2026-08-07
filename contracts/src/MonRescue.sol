@@ -39,11 +39,26 @@ contract MonRescue {
     address public immutable GUARDIAN;
 
     /**
-     * @notice Per-call gas cap for precompile calls.
+     * @notice Per-call gas caps for precompile calls.
+     *
      * @dev The staking precompile "consumes all gas" when given invalid arguments, so an
      * uncapped forward would let a single bad position destroy a multi-position rescue.
+     *
+     * These were 400,000 — and a cap only caps if it is SMALLER than the gas the transaction
+     * actually has. At a 350,000 transaction limit, EIP-150 forwards 63/64 of what remains
+     * (~344,000), the precompile eats all of it, and `_sweep` never runs. The protection read
+     * as present and was doing nothing. Measured on testnet at the epoch 1035 battle test: 63
+     * spray attempts and the backstop all reverted with `out of gas`, while the same call at a
+     * 1,000,000 limit simulated clean.
+     *
+     * Sized just above the measured successful cost of each call — withdraw 68,675,
+     * claimRewards 155,375 — so a failure burns a bounded amount and the sweep always has room.
+     *
+     * `estimateRescueGas()` in packages/shared sizes the transaction limit against these
+     * numbers assuming EVERY call fails. Change one, change both.
      */
-    uint256 internal constant WITHDRAW_GAS_CAP = 400_000;
+    uint256 internal constant WITHDRAW_GAS_CAP = 100_000;
+    uint256 internal constant CLAIM_GAS_CAP = 200_000;
 
     error ZeroSafeAddress();
     error SafeAddressIsPrecompile();
@@ -138,7 +153,7 @@ contract MonRescue {
             if (claimRewardsToo) {
                 // Rewards are a bonus, not the principal. A validator with nothing to claim
                 // must not abort the rescue of every other position.
-                (bool rOk, bytes memory rReason) = STAKING_PRECOMPILE.call{gas: WITHDRAW_GAS_CAP}(
+                (bool rOk, bytes memory rReason) = STAKING_PRECOMPILE.call{gas: CLAIM_GAS_CAP}(
                     abi.encodeWithSignature("claimRewards(uint64)", valId)
                 );
                 if (!rOk) emit ClaimFailed(valId, rReason);
@@ -219,7 +234,7 @@ contract MonRescue {
             // Only ACTIVATED stake can be undelegated, and `stake` is exactly that field. A
             // delegation made this epoch reads as 0 here and undelegating it would revert,
             // consuming the whole gas limit — so read first rather than discover on-chain.
-            (bool gotIt, bytes memory data) = STAKING_PRECOMPILE.call{gas: WITHDRAW_GAS_CAP}(
+            (bool gotIt, bytes memory data) = STAKING_PRECOMPILE.call{gas: CLAIM_GAS_CAP}(
                 abi.encodeWithSignature("getDelegator(uint64,address)", valId, address(this))
             );
             if (!gotIt || data.length < 32) {
@@ -232,7 +247,8 @@ contract MonRescue {
                 continue;
             }
 
-            (bool ok, bytes memory reason) = STAKING_PRECOMPILE.call{gas: WITHDRAW_GAS_CAP}(
+            // undelegate measured at 147,750 — the withdraw cap would not fit it.
+            (bool ok, bytes memory reason) = STAKING_PRECOMPILE.call{gas: CLAIM_GAS_CAP}(
                 abi.encodeWithSignature(
                     "undelegate(uint64,uint256,uint8)", valId, activeStake, withdrawId
                 )

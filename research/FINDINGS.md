@@ -549,6 +549,96 @@ Two further constraints that bite the hot path specifically:
 
 ---
 
+## Q19 — The first battle test: we lost, and not for any reason we were testing
+
+**Epoch 1035, testnet.** Both sides pre-signed, both bidding **75 gwei** — an equal-fee test.
+Adversary in `naive` mode, polling at 50ms, reacting. Us pre-queued across the window at one
+attempt per block, 100% coverage.
+
+### What happened
+
+| | |
+|---|---|
+| epoch flipped | block 51,704,945 |
+| attacker `withdraw()` | **success**, block 51,704,947 |
+| attacker transfer to their sink | **reverted**, block 51,704,949 |
+| our 63 spray attempts | all mined, **all reverted** |
+| our backstop | **reverted**, block 51,705,033 |
+| safe address received | **0 MON** |
+
+### Why we lost: the gas cap was larger than the gas limit
+
+`rescue()` calls `withdraw()` first, and the staking precompile **consumes everything forwarded
+to it** on failure. The contract capped that forward at `WITHDRAW_GAS_CAP = 400,000` — but the
+transaction's own limit was **350,000**, set by `GAS_LIMIT` in `.env`.
+
+A cap only caps if it is smaller than the gas the transaction actually holds. EIP-150 forwarded
+63/64 of what remained (~344,000), the precompile ate all of it, and `_sweep()` never ran. The
+protection the contract documents at length was **not in effect at any point**.
+
+Confirmed by simulation against the post-race state:
+
+```
+rescue(claimRewards=true)   gas   350,000  -> REVERT: out of gas
+rescue(claimRewards=true)   gas 1,000,000  -> OK
+rescue(claimRewards=false)  gas   350,000  -> REVERT: out of gas
+sweep()                     gas   120,000  -> OK
+```
+
+So the race was never run. Fee, timing, pre-queuing, window coverage — none of it was tested,
+because every transaction we sent was incapable of succeeding before it was broadcast.
+
+### The receipt cannot tell you this, and that matters
+
+The first diagnosis reached for `gasUsed` and found 350,000/350,000 on every failed attempt —
+apparently conclusive. It is not: **Monad charges the limit rather than the usage**, so
+`gasUsed` in a receipt always equals the limit. The attacker's *successful* withdraw reports
+200,000/200,000 by the same rule.
+
+`gasUsed` therefore carries no information about consumption on Monad, and an out-of-gas revert
+is indistinguishable from any other revert — and from losing a race — by receipt alone.
+`eth_call` at varying limits is what separates them. Worth remembering: the obvious field is a
+decoy here.
+
+### What the delegation did while we were failing
+
+The attacker's own transfer reverted. Their EOA held 124.97 MON, is delegated to our
+destination-locked contract, and the reserve rule caps what a delegated account may send at
+`balance − min(balance, 10 MON)` = 114.97 MON. They tried to send 124.9 and tripped it.
+
+So the 7702 delegation held the position while our entire rescue path was inoperative. **Do not
+sell this as a defence** — sending the correct amount would have worked, and a second attempt
+costs them one block. But it is why this run cost nothing.
+
+`sweep()` then recovered **114.97 MON** in one call, tx `0xf40e1d85…`, block 51,721,152, leaving
+the victim at exactly the 10 MON floor.
+
+### Three defects, all silent
+
+1. **`WITHDRAW_GAS_CAP` (400,000) > transaction limit (350,000).** Now 100,000 for `withdraw`
+   and 200,000 for `claimRewards`, both just above their measured successful costs (68,675 and
+   155,375). Requires **redeployment** — the caps live in the contract.
+2. **`estimateRescueGas()` sized the success case.** A failing call costs its full cap, not its
+   successful cost, so the limit must cover every call failing. One position with rewards goes
+   from ~280,000 to **428,750**.
+3. **`GAS_LIMIT` in `.env` silently overrode the estimate.** `arm` now refuses to start when the
+   override is below the computed requirement, rather than warning.
+
+And a fourth, in the CLI: `positionsGone()` checked only whether the withdrawal slots were
+empty, so it reported "the funds left without us" while 114.97 MON sat on the EOA. An empty slot
+plus a live balance is not a loss — it is precisely what `sweep()` is for. It now checks both.
+
+### The pattern, again
+
+This is the fifth time a number chosen for frugality sat on a path where being short loses
+everything: the 350k limit (twice now), the fee multiplier, the pre-queue default, the 3-block
+broadcast cadence. And it is the sixth silent failure — mined, charged in full, reverted, with
+a receipt that looks exactly like losing an honest race.
+
+**The battle test is still unrun.** Nothing about the contest was measured.
+
+---
+
 ## Q18 — Why spray at all? Mostly, you should not
 
 The spray was designed when detection cost **~116ms** over remote RPC — roughly a third of a

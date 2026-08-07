@@ -311,6 +311,16 @@ export const STAKING_GAS = {
   getWithdrawalRequest: 24_300n,
 } as const;
 
+/**
+ * Per-call gas caps, MIRRORING `contracts/src/MonRescue.sol`. Change one, change both.
+ *
+ * A cap only caps if it is smaller than the gas the transaction actually holds. These sit just
+ * above the measured successful cost of each call so that a failure — where the precompile
+ * consumes everything forwarded — burns a bounded amount and leaves the sweep its room.
+ */
+export const WITHDRAW_GAS_CAP = 100_000n;
+export const CLAIM_GAS_CAP = 200_000n;
+
 export interface RescueGasEstimate {
   gasLimit: bigint;
   perPosition: bigint;
@@ -326,26 +336,40 @@ export interface RescueGasEstimate {
  * margin, not a round number chosen upward "to be safe".
  */
 export function estimateRescueGas(positionCount: number, claimRewards: boolean): RescueGasEstimate {
-  // Calibrated against a real trace: tx 0x6c285d49… claimed three slots and the internal calls
-  // measured 68,675 gas each — exactly the documented figure — with ~251,200 consumed overall
-  // against a 350,000 limit. Overheads below are derived from that run rather than guessed.
+  // Sized against the FAILURE case, not the success case. That distinction cost a battle test.
+  //
+  // The old version summed the measured successful costs (withdraw 68,675, claimRewards
+  // 155,375) and added 25%, giving ~280,000 for one position — which looks right and is wrong.
+  // A failing precompile call does not cost what a successful one costs: it **consumes
+  // everything forwarded to it**. So the limit has to cover every call failing at its cap,
+  // because the whole reason `rescue()` continues past a failed withdraw is that the funds may
+  // already be sitting in the account waiting for the sweep — and the sweep is what needs the
+  // gas that a failed withdraw would otherwise have eaten.
+  //
+  // Measured at the epoch 1035 battle test: the attacker's withdraw landed first, our
+  // withdraw therefore failed, and all 63 attempts plus the backstop reverted with `out of
+  // gas` at a 350,000 limit. The same call simulated clean at 1,000,000. Nothing was wrong
+  // with the fee, the timing, or the strategy.
   const n = BigInt(Math.max(1, positionCount));
-  const perPosition = STAKING_GAS.withdraw + (claimRewards ? STAKING_GAS.claimRewards : 0n);
+  const perPosition = WITHDRAW_GAS_CAP + (claimRewards ? CLAIM_GAS_CAP : 0n);
   const calls = n * perPosition;
   const baseTx = 21_000n;
   const calldata = 4_000n;      // arrays of validator ids and slots
   const contract = 6_000n * n;  // loop, event emission, balance bookkeeping (measured ~15k total for 3)
   const sweep = 12_000n;        // native transfer to an EOA measured at ~0 plus the floor arithmetic
   const subtotal = baseTx + calldata + calls + contract + sweep;
-  // 25% margin: the precompile consumes all gas on a failed call, so being short is fatal
-  // while being long only costs the difference.
+  // 25% margin on top. Monad charges the limit rather than the usage, so a generous limit costs
+  // real money on every attempt — but being short does not cost the difference, it costs the
+  // position.
   const gasLimit = (subtotal * 125n) / 100n;
   return {
     gasLimit,
     perPosition,
     breakdown:
-      `${positionCount} position(s) x ${perPosition} + base ${baseTx} + calldata ${calldata} + ` +
-      `contract ${contract} + sweep ${sweep} = ${subtotal}, +25% margin -> ${gasLimit}`,
+      `${positionCount} position(s) x ${perPosition} (worst case: withdraw ${WITHDRAW_GAS_CAP}` +
+      `${claimRewards ? ` + claim ${CLAIM_GAS_CAP}` : ''} both failing at their cap) + ` +
+      `base ${baseTx} + calldata ${calldata} + contract ${contract} + sweep ${sweep} = ` +
+      `${subtotal}, +25% margin -> ${gasLimit}`,
   };
 }
 

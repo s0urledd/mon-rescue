@@ -84,6 +84,8 @@ input is signatures made in their own wallet.
 | `withdrawEpoch` | the **activation** epoch (`n+1`, or `n+2` past the boundary) |
 | Maturity | `withdrawEpoch + WITHDRAWAL_DELAY` |
 | `withdraw()` gas | exactly **68,675** |
+| `gasUsed` in a receipt | **always equals the limit** — carries no information about consumption |
+| Failed precompile call | consumes **everything forwarded**, so a gas cap above the tx limit caps nothing |
 | `claimRewards()` gas | 155,375 — **70% of per-position cost**, usually not worth it |
 | Sweep to an EOA | ~0 gas |
 | Reserve floor | `min(balance at start, 10 MON)` — strands only what was already there |
@@ -143,6 +145,10 @@ long merely costs money:
 4. One broadcast every 3 blocks — covering a third of the flip window, so two times out of
    three the flip block found nothing of ours queued and we reacted after all. Paying the
    spray's full cost for a third of its benefit.
+5. `GAS_LIMIT=350000` in `.env`, silently overriding `estimateRescueGas()`. It sat below the
+   contract's own 400,000 gas cap, so the cap capped nothing, a failing `withdraw()` ate the
+   whole transaction, and `_sweep()` never ran. **This lost the epoch 1035 battle test** — all
+   63 attempts and the backstop reverted with `out of gas` before any race was run.
 
 The operator has said plainly that cost is not the constraint. **Optimise for winning.** When a
 default trades a small certain cost against a small chance of total loss, take the cost.
@@ -181,8 +187,9 @@ not running.
   where the epoch has flipped by definition and a failure is real evidence of a contest. The
   window fee anchors on p90 (×10), not the max observed bid — 10x an outlier across ~60 window
   attempts costs ~98 MON to cover a window that is usually uncontested.
-- **Battle test not run.** Every rescue so far was uncontested. Winning at an *equal* fee is the
-  result that means something; losing at a lower fee is expected.
+- **Battle test still unrun.** The epoch 1035 attempt measured nothing: every transaction we
+  sent was incapable of succeeding before it was broadcast (Q19). Re-run after redeploying —
+  the gas caps live in the contract.
 - **Giving up is now bounded, not automatic.** A reverted backstop used to exit the process. It
   now retries while any slot still holds a withdrawal request and the guardian can afford a
   shot, because `rescue()` sweeps regardless of whether the withdrawals succeed — so a revert
