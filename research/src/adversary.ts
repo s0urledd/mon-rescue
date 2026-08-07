@@ -31,7 +31,7 @@ import { createWalletClient, http, formatEther, encodeFunctionData, parseGwei } 
 import { privateKeyToAccount } from 'viem/accounts';
 import {
   chainById, RPC_POOL, publicClientFor, STAKING_PRECOMPILE, STAKING_ABI,
-  getEpoch, getWithdrawalRequest, isClaimable, advise, latestStartBlockFor,
+  getEpoch, getWithdrawalRequest, isClaimable, advise, latestStartBlockFor, maturityEpoch,
 } from '@monrescue/shared';
 import { writeArtifact, requireEnv } from './lib.js';
 
@@ -58,8 +58,21 @@ async function main() {
 
   const req = await getWithdrawalRequest(client, validatorId, account.address, withdrawId);
   if (req.withdrawalAmount === 0n) throw new Error('no pending withdrawal to race for');
-  const targetEpoch = req.withdrawEpoch;
-  console.log(`racing for ${formatEther(req.withdrawalAmount)} MON, matures after epoch ${targetEpoch}`);
+
+  // `withdrawEpoch` is the ACTIVATION epoch, not maturity. `isClaimable` takes activation and
+  // applies WITHDRAWAL_DELAY itself, so the firing trigger below is right — but `advise` and
+  // `latestStartBlockFor` want the MATURITY epoch, because they reason about boundary blocks.
+  // Passing activation to them made the abort guard fire at
+  // latestStartBlockFor(activation) + 10,000, which for a one-epoch delay is ~40,000 blocks
+  // BEFORE maturity. The adversary would have exited with "target epoch window passed" about
+  // three hours before the race it exists to run, and the battle test would have recorded a
+  // walkover that never happened.
+  const activationEpoch = req.withdrawEpoch;
+  const targetEpoch = maturityEpoch(activationEpoch);
+  console.log(
+    `racing for ${formatEther(req.withdrawalAmount)} MON — activation epoch ${activationEpoch}, ` +
+      `claimable at epoch ${targetEpoch}`,
+  );
 
   const balance = await client.getBalance({ address: account.address });
   console.log(`EOA balance ${formatEther(balance)} MON (the attacker needs gas here to act)`);
@@ -71,10 +84,26 @@ async function main() {
     return;
   }
 
+  // Fee control, explicit — because "we won" is only a result if we can say what both sides bid.
+  //
+  // The old default multiplied `estimateFeesPerGas`, and Monad's `eth_maxPriorityFeePerGas` is a
+  // hardcoded 2 gwei, so "20x" meant a flat 40 gwei tip that measured nothing — the same broken
+  // abstraction removed from our own side. Worse for a test: on a quiet testnet our window bids
+  // p90 x 15 = 30 gwei, so the adversary would have been bidding ABOVE us by accident and the
+  // run would have looked like a loss on strategy when it was a difference in fees.
+  //
+  // Set ADVERSARY_TIP_GWEI to the tip `arm` prints for its window to run the equal-fee test,
+  // which is the one whose outcome means something.
   const fees = await client.estimateFeesPerGas();
-  const mult = BigInt(process.env.ADVERSARY_FEE_MULTIPLIER ?? 20);
-  const maxFeePerGas = (fees.maxFeePerGas ?? parseGwei('100')) * mult;
-  const maxPriorityFeePerGas = (fees.maxPriorityFeePerGas ?? parseGwei('2')) * mult;
+  const tipGwei = process.env.ADVERSARY_TIP_GWEI;
+  const maxPriorityFeePerGas = tipGwei
+    ? parseGwei(tipGwei)
+    : (fees.maxPriorityFeePerGas ?? parseGwei('2')) * BigInt(process.env.ADVERSARY_FEE_MULTIPLIER ?? 20);
+  const maxFeePerGas = (fees.maxFeePerGas ?? parseGwei('100')) * 3n + maxPriorityFeePerGas;
+  console.log(
+    `attacker bid: ${maxPriorityFeePerGas / 1_000_000_000n} gwei tip` +
+      `${tipGwei ? ' (explicit — equal-fee test)' : ' (multiplier default — NOT an equal-fee test)'}`,
+  );
 
   const withdrawData = encodeFunctionData({
     abi: STAKING_ABI, functionName: 'withdraw', args: [validatorId, withdrawId],
@@ -93,7 +122,7 @@ async function main() {
   for (;;) {
     const epoch = await getEpoch(client);
     const block = await client.getBlockNumber();
-    if (isClaimable(epoch, targetEpoch)) {
+    if (isClaimable(epoch, activationEpoch)) {
       console.log(`\nepoch ${epoch.epoch} at block ${block} — FIRING withdraw`);
       const hash = await client.request({
         method: 'eth_sendRawTransaction', params: [rawWithdraw],
