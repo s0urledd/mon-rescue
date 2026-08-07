@@ -10,7 +10,8 @@ import { readFileSync } from 'node:fs';
 import {
   chainById, RPC_POOL, getEpoch, getWithdrawalRequest, planSweep, assertSweepAllowed,
   isClaimable, maturityEpoch, isEmptySlot, advise, boundaryBlockFor,
-  earliestStartBlockFor, latestStartBlockFor, localFirstClient, transportConfigFromEnv,
+  earliestStartBlockFor, latestStartBlockFor, sprayStartBlockFor,
+  localFirstClient, transportConfigFromEnv,
   detectLocalNode,
   discoverUnstakes, validatorIdsFrom, estimateRescueGas,
 } from '@monrescue/shared';
@@ -51,7 +52,21 @@ import { isAbsolute, resolve } from 'node:path';
 const CHAIN_ID = Number(process.env.CHAIN_ID ?? 143);
 const MIN_POLL_MS = Number(process.env.EPOCH_POLL_MS ?? 300);
 const SECONDS_PER_BLOCK = Number(process.env.SECONDS_PER_BLOCK ?? 0.301);
-const SPRAY_BLOCKS_PER_ATTEMPT = Number(process.env.SPRAY_BLOCKS_PER_ATTEMPT ?? 3);
+/**
+ * Blocks between broadcasts during the flip window. **One**, and the reason is the whole point
+ * of pre-queuing.
+ *
+ * A broadcast attempt is in a leader's mempool for roughly one block before it is included. So
+ * one attempt every N blocks means only 1-in-N blocks of the window has a transaction of ours
+ * queued when it is built. The default was 3 — covering a third of the window, so two times out
+ * of three the flip block would find nothing pre-queued and we would be reacting after all,
+ * landing at N+1. That is paying the spray's cost and getting none of its benefit, and it is the
+ * frugal-default mistake in its fourth location.
+ *
+ * At 1 block per attempt the window is fully covered: whenever the flip lands, something of ours
+ * is already there. Raise it only to deliberately trade coverage for gas.
+ */
+const SPRAY_BLOCKS_PER_ATTEMPT = Number(process.env.SPRAY_BLOCKS_PER_ATTEMPT ?? 1);
 const SPRAY_MAX_IN_FLIGHT = Number(process.env.SPRAY_MAX_IN_FLIGHT ?? 4);
 const SLOTS_TO_PROBE = Number(process.env.SLOTS_TO_PROBE ?? 32);
 /** Authorizations carried per attempt. Each costs ~25k gas; all name the same contract. */
@@ -304,13 +319,33 @@ async function main() {
 
   console.log(`pre-signing ${attemptCount} attempt(s) from nonce ${baseNonce}...`);
   const t0 = Date.now();
-  // Ascending fees across the sequence: cheap enough to be free when uncontested, climbing to
-  // the authorised budget if nothing lands. spray() stops as soon as the rescue succeeds, so
-  // the expensive rungs are only ever broadcast in a real fight.
-  const schedule = feeSchedule(observed, gas, maxSpendPerAttempt, attemptCount);
+  // How many attempts cover the flip window. Broadcasting starts at sprayStartBlockFor and the
+  // epoch must have flipped by latestStartBlockFor, so that span divided by the broadcast
+  // cadence is the number of attempts that could each be the one in the decisive block. They
+  // are priced identically; only what comes after them escalates.
+  const windowBlocks = Number(latestStartBlockFor(targetEpoch) - sprayStartBlockFor(targetEpoch));
+  const windowAttempts = Math.max(1, Math.ceil(windowBlocks / SPRAY_BLOCKS_PER_ATTEMPT) + 2);
+  const schedule = feeSchedule(observed, gas, maxSpendPerAttempt, attemptCount, windowAttempts);
+  const windowCost = schedule
+    .slice(0, Math.min(windowAttempts, attemptCount))
+    .reduce((a, p) => a + p.costPerAttempt, 0n);
   console.log(
     `fee ladder: ${schedule[0]!.explanation} -> ${schedule[schedule.length - 1]!.explanation}`,
   );
+  const covered = Math.min(windowAttempts, attemptCount) * SPRAY_BLOCKS_PER_ATTEMPT;
+  console.log(
+    `  ${Math.min(windowAttempts, attemptCount)} flat attempt(s) at ${formatEther(windowCost)} MON ` +
+      `total cover ${Math.min(100, Math.round((covered / windowBlocks) * 100))}% of the ` +
+      `${windowBlocks}-block window; any of them can be the flip block, so all bid the same`,
+  );
+  if (covered < windowBlocks) {
+    // Say it out loud rather than let a silent cap read as full coverage. An uncovered block is
+    // one where the flip finds nothing of ours queued and we fall back to reacting.
+    console.warn(
+      `  WARN: ${windowBlocks - covered} block(s) of the window have no attempt queued. ` +
+        `If the flip lands there we react instead of pre-queueing and reach N+1, not N.`,
+    );
+  }
 
   const attempts: SprayAttempt[] = [];
   for (let i = 0; i < attemptCount; i++) {
@@ -405,6 +440,18 @@ async function main() {
 
     if (a.phase === 'idle' || a.phase === 'approaching') {
       console.log(`[${a.phase}] ${a.reason}`);
+      await sleep(a.pollIntervalMs);
+      continue;
+    }
+
+    // Inside the burst window but not yet at a block where the flip is physically possible.
+    // Keep polling at full speed — being late costs the rescue — but do not spend: an attempt
+    // broadcast here is a guaranteed revert that burns a ladder rung and its full gas limit.
+    if (!a.shouldBroadcast) {
+      console.log(
+        `[${a.phase}] holding broadcast until block ${a.sprayStart} ` +
+          `(${a.sprayStart - block} to go) — the flip cannot happen before it`,
+      );
       await sleep(a.pollIntervalMs);
       continue;
     }

@@ -147,20 +147,39 @@ export function maxSpendPerAttemptFromEnv(): bigint {
 }
 
 /**
- * An ascending fee schedule across spray attempts.
+ * The fee schedule across spray attempts: FLAT through the flip window, escalating only after.
  *
- * Two things are true at once: being comfortably above ordinary traffic is enough most of the
- * time, and if there *is* a gas war we are willing to spend far more. A single fee cannot
- * express both, and picking one means either overpaying every uncontested rescue or losing
- * every contested one.
+ * The previous version ramped cubically by attempt index, on the reasoning that most rescues
+ * are uncontested so most attempts should be cheap. That reasoning does not survive contact
+ * with how the window actually works.
  *
- * So the attempts escalate. The first sits just above the p90 of live bids — cheap, and enough
- * to beat anyone using default fees. Later ones climb toward the per-attempt budget. Because
- * `spray()` checks whether the rescue has landed before each attempt, an early cheap success
- * stops the ladder before the expensive rungs are ever broadcast.
+ * In `window` mode we broadcast across the ~40-block flip uncertainty, and **we do not know
+ * which attempt will be the one sitting in the leader's mempool when the flip block is built.**
+ * Any of them could be. So pricing them on a ramp means most of the candidates for the decisive
+ * block are priced to lose — and the ones priced to win are the tail rungs, which only arrive if
+ * the flip lands late. The ramp is not cheap-when-uncontested; it is a lottery over which fee we
+ * happen to be bidding at the one block that matters.
  *
- * Every rung is signed up front, so escalation costs nothing in the hot path — the flip window
- * still does nothing but broadcast.
+ * It also makes the battle test unmeasurable: "we won at an equal fee" means nothing if we
+ * cannot say what we bid at the decisive block.
+ *
+ * So:
+ *
+ *  - **Window attempts are all priced the same**, at a fee comfortably above live traffic.
+ *    Whichever one lands in the flip block, we bid the same thing. That is the controlled
+ *    variable the test needs and the correct behaviour regardless.
+ *  - **Escalation begins after the window**, where by construction the epoch has flipped
+ *    (`latestStart` is an upper bound) and attempts are still failing. That is the first real
+ *    evidence of a contest, as opposed to a counter running.
+ *
+ * The window fee anchors on the **p90** of observed bids, not the maximum. The max is an
+ * outlier — measured at 1,482 gwei against a p90 of 78 — and paying 10x an outlier on every one
+ * of ~20 window attempts would cost ~98 MON to cover a window that is usually uncontested. 10x
+ * the p90 is ~0.29 MON per attempt, so a full window costs a few MON and still outbids anyone
+ * not specifically racing us. The outlier is the right anchor for the escalation rungs, where we
+ * have actual evidence someone is.
+ *
+ * Every rung is signed up front, so none of this costs anything in the hot path.
  *
  * Note these use CONSECUTIVE nonces, not a shared one. Same-nonce replacement is undocumented
  * on Monad (see FINDINGS), so relying on it to supersede a cheaper attempt would be building on
@@ -171,45 +190,57 @@ export function feeSchedule(
   gasLimit: bigint,
   maxSpendPerAttempt: bigint,
   attempts: number,
+  /**
+   * How many leading attempts cover the flip window and are therefore priced flat. Defaults to
+   * all of them: with no window information, every attempt is a candidate for the decisive
+   * block and none should be priced to lose.
+   */
+  windowAttempts = attempts,
+  windowOvertop = BigInt(process.env.WINDOW_FEE_OVERTOP ?? 10),
 ): FeePlan[] {
   if (attempts <= 0) return [];
-
-  // Opening bid: above the p90 of live traffic, with a floor so a quiet chain still gets a
-  // meaningful tip rather than matching the 2 gwei default everyone else sends.
-  const opening = observed.p90Priority > 0n
-    ? observed.p90Priority * 2n
-    : observed.baseFeePerGas / 2n;
 
   const affordableTotal = maxSpendPerAttempt / gasLimit;
   const ceiling = affordableTotal > observed.baseFeePerGas
     ? affordableTotal - observed.baseFeePerGas
     : 0n;
 
-  const top = opening > ceiling ? ceiling : opening;
+  // Above the p90 of live traffic, with a floor so a quiet chain still gets a meaningful tip
+  // rather than matching the 2 gwei default that everyone else sends.
+  const wanted = observed.p90Priority > 0n
+    ? observed.p90Priority * windowOvertop
+    : observed.baseFeePerGas / 2n;
+  const windowFee = wanted > ceiling ? ceiling : wanted;
 
-  const plans: FeePlan[] = [];
-  for (let i = 0; i < attempts; i++) {
-    // Cubic climb, not linear. Most rescues are uncontested, so most attempts should cost
-    // almost nothing; a linear ramp reaches half the budget by the middle of the sequence and
-    // spends heavily on fights that are not happening. Cubed progress keeps the first half
-    // cheap and concentrates the escalation at the tail, where the evidence of a real contest
-    // is that nothing has landed yet.
-    const progress = attempts === 1 ? 1 : i / (attempts - 1);
-    const curved = progress * progress * progress;
-    const scaled = top + ((ceiling - top) * BigInt(Math.round(curved * 10_000))) / 10_000n;
-    const maxPriorityFeePerGas = scaled < ceiling ? scaled : ceiling;
+  const flat = Math.max(1, Math.min(windowAttempts, attempts));
+  const climbing = attempts - flat;
+
+  const build = (maxPriorityFeePerGas: bigint, label: string): FeePlan => {
     const maxFeePerGas = observed.baseFeePerGas * 3n + maxPriorityFeePerGas;
     const costPerAttempt = gasLimit * (observed.baseFeePerGas + maxPriorityFeePerGas);
-    const overtopBy = observed.maxPrioritySeen > 0n
-      ? Number((maxPriorityFeePerGas * 100n) / observed.maxPrioritySeen) / 100
-      : Infinity;
-    plans.push({
+    return {
       maxFeePerGas,
       maxPriorityFeePerGas,
       costPerAttempt,
-      overtopBy,
-      explanation: `${maxPriorityFeePerGas / 1_000_000_000n} gwei tip, ${formatEther(costPerAttempt)} MON`,
-    });
+      overtopBy: observed.maxPrioritySeen > 0n
+        ? Number((maxPriorityFeePerGas * 100n) / observed.maxPrioritySeen) / 100
+        : Infinity,
+      explanation:
+        `${maxPriorityFeePerGas / 1_000_000_000n} gwei tip, ${formatEther(costPerAttempt)} MON${label}`,
+    };
+  };
+
+  const plans: FeePlan[] = [];
+  for (let i = 0; i < flat; i++) plans.push(build(windowFee, ' (window)'));
+
+  for (let i = 0; i < climbing; i++) {
+    // Cubic climb across the escalation rungs only. These fire after the window has closed, so
+    // every one of them is evidence that something is beating us; the curve concentrates the
+    // spend at the tail where that evidence is strongest.
+    const progress = climbing === 1 ? 1 : i / (climbing - 1);
+    const curved = progress * progress * progress;
+    const scaled = windowFee + ((ceiling - windowFee) * BigInt(Math.round(curved * 10_000))) / 10_000n;
+    plans.push(build(scaled < ceiling ? scaled : ceiling, ' (escalation)'));
   }
   return plans;
 }

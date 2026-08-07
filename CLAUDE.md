@@ -112,12 +112,15 @@ belongs to the guardian; two customers maturing in the same epoch would split on
 
 ## The recurring mistake — check for it
 
-**Three times** a default was set for frugality on a path where being short is fatal and being
+**Four times** a default was set for frugality on a path where being short is fatal and being
 long merely costs money:
 
 1. A 350k gas limit that lost an entire rescue attempt
 2. A fee multiplier that scaled a constant
 3. Defaulting away from pre-queuing to save ~2 MON
+4. One broadcast every 3 blocks — covering a third of the flip window, so two times out of
+   three the flip block found nothing of ours queued and we reacted after all. Paying the
+   spray's full cost for a third of its benefit.
 
 The operator has said plainly that cost is not the constraint. **Optimise for winning.** When a
 default trades a small certain cost against a small chance of total loss, take the cost.
@@ -151,9 +154,11 @@ not running.
   attacker chooses how many `undelegate` calls to make. 50 slots multiplies our per-attempt cost
   13x; at the 256 maximum one attempt costs ~35 MON and collides with the inflight budget,
   collapsing the spray to a single shot. Likely fix: split the rescue across transactions.
-- **Ladder escalates by attempt index**, so in `window` mode the cheap rungs are spent on
-  premature attempts and the expensive ones arrive exactly when the contest starts. Should key
-  off attempts failing *after* maturity.
+- ~~Ladder escalates by attempt index~~ **fixed.** Window attempts are now priced flat, because
+  any of them can be the one in the flip block; escalation begins only after the window closes,
+  where the epoch has flipped by definition and a failure is real evidence of a contest. The
+  window fee anchors on p90 (×10), not the max observed bid — 10x an outlier across ~60 window
+  attempts costs ~98 MON to cover a window that is usually uncontested.
 - **Battle test not run.** Every rescue so far was uncontested. Winning at an *equal* fee is the
   result that means something; losing at a lower fee is expected.
 - **Giving up is now bounded, not automatic.** A reverted backstop used to exit the process. It

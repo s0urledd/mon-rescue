@@ -608,10 +608,58 @@ The earlier framing — "the fastest method is to not detect at all" — was rig
 mechanism and wrong about the economics once a local node removed the detection cost. It bought
 one block for a price that only makes sense when someone is actually racing.
 
-A related error the same reasoning exposes: the cubic fee ladder escalates by *attempt index*,
-so in `window` mode the cheap early rungs are spent on premature attempts before the flip, and
-the expensive rungs arrive exactly when the contest starts. Escalation should key off attempts
-that fail **after** maturity, not off a counter. Not yet fixed.
+### The ladder was bidding a random number at the decisive block — fixed
+
+The cubic ladder escalated by *attempt index*. In `window` mode that is not "cheap when
+uncontested"; it is a lottery. **We do not know which attempt will be the one in the leader's
+mempool when the flip block is built** — any of them can be — so a ramp prices most of the
+candidates to lose and reserves the winning prices for rungs that only arrive if the flip lands
+late.
+
+Computed against the measured mainnet distribution (base 100 gwei, p90 78, max 1,482), 30
+attempts on a 330k-gas rescue with a 5 MON budget:
+
+```
+old, cubic across all 30 — tip at the decisive block, by where the flip landed:
+  780, 780, 780, 785, 797, 821, 861, 919, 1002, 1112, 1253, 1430,
+  1644, 1903, 2208, 2563, 2973, 3443, 3973, 4571, 5239, 5980 gwei
+```
+
+An **8x spread on the one number that decides the race**, selected by chance. "We won at an
+equal fee" is unmeasurable under that, because there is no single fee to compare.
+
+Now: every window attempt is priced identically, and escalation starts only after the window
+closes — where `latestStartBlockFor` guarantees the epoch has flipped, so a still-failing attempt
+is the first real evidence of a contest rather than a counter running.
+
+```
+new: 22 x 780 gwei = 6.39 MON (window, flat)
+     then 780 -> 821 -> 1112 -> 1903 -> 3443 -> 5980 -> 9766 -> 15051 gwei (escalation)
+     19.48 MON worst case if every rung fires
+```
+
+The window fee anchors on the **p90 (×10)**, not the maximum. The max is a single outlier out of
+69 transactions; paying 10x it on every one of ~60 window attempts would cost ~98 MON to cover a
+window that is usually uncontested. The outlier is the right anchor for the escalation rungs,
+where there is actual evidence someone is racing.
+
+### Two more things that fell out of costing it properly
+
+**Broadcasting started 62 blocks before the flip could physically happen.** `EARLIEST_DELAY_BLOCKS`
+is 4,900, deliberately pessimistic because watching early is nearly free. Broadcasting early is
+not: every attempt before the smallest possible delay (4,962 measured) is a guaranteed revert
+charged its full gas limit, and it consumes a nonce from a finite ladder. Broadcasting now starts
+at `SPRAY_START_DELAY_BLOCKS` = 4,940 — 22 blocks of margin against a flip earlier than anything
+observed, without the 40 blocks of certain waste. Polling still starts at 4,900. Watch
+pessimistically, spend optimistically.
+
+**One attempt every 3 blocks covered a third of the window.** A broadcast sits in the mempool for
+about one block before inclusion, so a cadence of 3 leaves two blocks in three with nothing of
+ours queued — and if the flip lands on one of those, we are reacting after all and reach N+1.
+That is the spray's entire cost for a third of its benefit, and it is the fourth appearance of the
+same frugal default. Now 1 block per attempt, and `arm` prints the covered percentage and warns
+explicitly when a cap leaves part of the window bare, so a silent truncation cannot read as full
+coverage.
 
 ### The back-off that would have stranded the whole ladder
 

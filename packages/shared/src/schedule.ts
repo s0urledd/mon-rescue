@@ -51,6 +51,29 @@ export function earliestStartBlockFor(epoch: bigint): bigint {
   return boundaryBlockFor(epoch) + EARLIEST_DELAY_BLOCKS;
 }
 
+/**
+ * When to start *broadcasting*, which is not the same as when to start *watching*.
+ *
+ * Watching early is nearly free, so `EARLIEST_DELAY_BLOCKS` is deliberately pessimistic.
+ * Broadcasting early is not free: every attempt sent before the flip can physically happen is
+ * included, reverts, and is charged its full gas limit — while also consuming a nonce from a
+ * finite pre-signed ladder.
+ *
+ * The smallest delay ever measured is 4,962 blocks, from four observations. Starting at 4,940
+ * keeps ~22 blocks (~7 attempts at the default cadence) of margin against a flip earlier than
+ * anything yet seen, while dropping the 40 blocks of guaranteed-wasted broadcasts that starting
+ * at 4,900 would produce.
+ *
+ * The asymmetry still holds and still decides the constant: broadcasting 22 blocks early costs
+ * a few attempts, broadcasting one block late can cost the position. If a flip is ever observed
+ * below 4,962, lower this immediately and record it in FINDINGS.
+ */
+export const SPRAY_START_DELAY_BLOCKS = 4_940n;
+
+export function sprayStartBlockFor(epoch: bigint): bigint {
+  return boundaryBlockFor(epoch) + SPRAY_START_DELAY_BLOCKS;
+}
+
 export type Phase =
   | 'idle'          // far from the target; sleep cheaply
   | 'approaching'   // boundary block passed, epoch not yet due; poll moderately
@@ -63,6 +86,13 @@ export interface ScheduleAdvice {
   boundaryBlock: bigint;
   earliestStart: bigint;
   latestStart: bigint;
+  /** First block at which broadcasting can possibly land in the flip block. */
+  sprayStart: bigint;
+  /**
+   * True once a broadcast could actually be the one sitting in the flip block. Before this,
+   * attempts are guaranteed reverts: they cost gas and burn ladder rungs for nothing.
+   */
+  shouldBroadcast: boolean;
   blocksUntilBurst: bigint;
   /** Suggested poll interval for this phase, in milliseconds. */
   pollIntervalMs: number;
@@ -91,21 +121,25 @@ export function advise(input: ScheduleInput): ScheduleAdvice {
   const boundaryBlock = boundaryBlockFor(targetEpoch);
   const earliestStart = earliestStartBlockFor(targetEpoch);
   const latestStart = latestStartBlockFor(targetEpoch);
+  const sprayStart = sprayStartBlockFor(targetEpoch);
   const secondsPerBlock = input.secondsPerBlock ?? 0.3;
 
   if (current.epoch >= targetEpoch) {
     return {
-      phase: 'due', targetEpoch, boundaryBlock, earliestStart, latestStart,
+      phase: 'due', targetEpoch, boundaryBlock, earliestStart, latestStart, sprayStart,
+      shouldBroadcast: true,
       blocksUntilBurst: 0n, pollIntervalMs: minPollMs,
       reason: `epoch ${current.epoch} has reached target ${targetEpoch} — fire now`,
     };
   }
 
   const blocksUntilBurst = earliestStart > currentBlock ? earliestStart - currentBlock : 0n;
+  const shouldBroadcast = currentBlock >= sprayStart;
 
   if (currentBlock >= earliestStart) {
     return {
-      phase: 'burst', targetEpoch, boundaryBlock, earliestStart, latestStart,
+      phase: 'burst', targetEpoch, boundaryBlock, earliestStart, latestStart, sprayStart,
+      shouldBroadcast,
       blocksUntilBurst: 0n, pollIntervalMs: minPollMs,
       reason:
         `inside the flip window (block ${currentBlock} of ${earliestStart}..${latestStart}) — ` +
@@ -116,8 +150,13 @@ export function advise(input: ScheduleInput): ScheduleAdvice {
   if (currentBlock >= boundaryBlock) {
     // Past the boundary block: changes are committed and the countdown is running. Poll often
     // enough to notice an unusually early flip, but there is still real time left.
+    //
+    // `shouldBroadcast` is false throughout this phase and stays false for the first 40 blocks
+    // of `burst`, since sprayStart (+4,940) sits inside the burst window (+4,900). That gap is
+    // the intended shape: watch pessimistically, spend optimistically.
     return {
-      phase: 'approaching', targetEpoch, boundaryBlock, earliestStart, latestStart,
+      phase: 'approaching', targetEpoch, boundaryBlock, earliestStart, latestStart, sprayStart,
+      shouldBroadcast,
       blocksUntilBurst, pollIntervalMs: Math.max(minPollMs, 2_000),
       reason:
         `boundary block passed; ${blocksUntilBurst} block(s) until the flip window ` +
@@ -127,7 +166,8 @@ export function advise(input: ScheduleInput): ScheduleAdvice {
 
   const blocksToBoundary = boundaryBlock - currentBlock;
   return {
-    phase: 'idle', targetEpoch, boundaryBlock, earliestStart, latestStart,
+    phase: 'idle', targetEpoch, boundaryBlock, earliestStart, latestStart, sprayStart,
+    shouldBroadcast,
     blocksUntilBurst, pollIntervalMs: Math.max(minPollMs, 30_000),
     reason:
       `${blocksToBoundary} block(s) to the boundary block ` +
