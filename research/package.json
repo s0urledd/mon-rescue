@@ -15,6 +15,7 @@
     "script:d": "pnpm --filter @monrescue/shared build && tsx src/script-d-guardian.ts",
     "bench": "pnpm --filter @monrescue/shared build && tsx src/bench-latency.ts",
     "stake": "pnpm --filter @monrescue/shared build && tsx src/setup-stake.ts",
+    "peek": "pnpm --filter @monrescue/shared build && tsx src/peek.ts",
     "make-window": "pnpm --filter @monrescue/shared build && tsx src/make-window.ts",
     "adversary": "pnpm --filter @monrescue/shared build && tsx src/adversary.ts",
     "boundary": "pnpm --filter @monrescue/shared build && tsx src/boundary-experiment.ts",
