@@ -32,6 +32,7 @@ import { privateKeyToAccount } from 'viem/accounts';
 import {
   chainById, RPC_POOL, publicClientFor, STAKING_PRECOMPILE, STAKING_ABI,
   getEpoch, getWithdrawalRequest, isClaimable, advise, latestStartBlockFor, maturityEpoch,
+  sprayStartBlockFor,
 } from '@monrescue/shared';
 import { writeArtifact, requireEnv } from './lib.js';
 
@@ -109,23 +110,72 @@ async function main() {
     abi: STAKING_ABI, functionName: 'withdraw', args: [validatorId, withdrawId],
   });
 
-  // Pre-sign, exactly as we do — a fair race means both sides are pre-staged.
-  const nonce = await client.getTransactionCount({ address: account.address });
-  const rawWithdraw = await wallet.signTransaction({
+  /**
+   * Reacting or pre-queuing?
+   *
+   * `react` (default) polls and fires on detection. It cannot reach the flip block: the epoch
+   * advances in transaction 0 of that block, so anything sent in response to seeing the change
+   * is already a block late. This is the attacker the product expects.
+   *
+   * `prequeue` mirrors our own strategy — a signed attempt in the leader's mempool on every
+   * block of the flip window, so one of them is present when the flip block is built. At an
+   * equal fee this is the case where neither side has a structural edge and the auction decides,
+   * and it is the only version of the test whose result bounds what we can honestly claim. The
+   * epoch 1035 run tested `react`, which is the easy half of the table.
+   */
+  const strategy = (process.env.ADVERSARY_STRATEGY ?? 'react').toLowerCase();
+  const baseNonce = await client.getTransactionCount({ address: account.address });
+
+  const signWithdraw = (nonce: number) => wallet.signTransaction({
     to: STAKING_PRECOMPILE, data: withdrawData, nonce,
     gas: 200_000n, maxFeePerGas, maxPriorityFeePerGas, chain,
   });
-  console.log(`withdraw pre-signed at nonce ${nonce}`);
+
+  let queued: `0x${string}`[] = [];
+  if (strategy === 'prequeue') {
+    const windowBlocks = Number(latestStartBlockFor(targetEpoch) - sprayStartBlockFor(targetEpoch));
+    const count = Number(process.env.ADVERSARY_ATTEMPTS ?? windowBlocks + 2);
+    queued = await Promise.all(
+      Array.from({ length: count }, (_, i) => signWithdraw(baseNonce + i)),
+    );
+    console.log(
+      `pre-signed ${count} withdraw attempt(s) from nonce ${baseNonce} — one per block across ` +
+        `the ${windowBlocks}-block window (blocks ${sprayStartBlockFor(targetEpoch)}..` +
+        `${latestStartBlockFor(targetEpoch)})`,
+    );
+  } else {
+    queued = [await signWithdraw(baseNonce)];
+    console.log(`withdraw pre-signed at nonce ${baseNonce} (react: fires on detection)`);
+  }
 
   console.log(`waiting for epoch ${targetEpoch}...`);
   const t0 = Date.now();
+  let sprayed = 0;
   for (;;) {
     const epoch = await getEpoch(client);
     const block = await client.getBlockNumber();
+
+    // Pre-queue: broadcast through the window rather than waiting to be told the epoch changed.
+    // Each attempt carries its own nonce, so a premature one reverts and the next is unaffected.
+    if (strategy === 'prequeue' && block >= sprayStartBlockFor(targetEpoch) && sprayed < queued.length) {
+      const raw = queued[sprayed]!;
+      sprayed++;
+      client.request({ method: 'eth_sendRawTransaction', params: [raw] } as never)
+        .then((h) => console.log(`  queued #${sprayed} nonce=${baseNonce + sprayed - 1} ${h}`))
+        .catch((e) => console.log(`  queued #${sprayed} rejected: ${(e as Error).message.split('\n')[0]}`));
+      await sleep(Math.round(0.301 * 1000));
+      continue;
+    }
+
     if (isClaimable(epoch, activationEpoch)) {
       console.log(`\nepoch ${epoch.epoch} at block ${block} — FIRING withdraw`);
+      // In prequeue mode the winning attempt is already in flight; this is the fallback for a
+      // window that ran dry, and it signs fresh at whatever nonce is now current.
+      const raw = strategy === 'prequeue'
+        ? await signWithdraw(await client.getTransactionCount({ address: account.address }))
+        : queued[0]!;
       const hash = await client.request({
-        method: 'eth_sendRawTransaction', params: [rawWithdraw],
+        method: 'eth_sendRawTransaction', params: [raw],
       } as never) as `0x${string}`;
       const fired = Date.now();
       console.log(`withdraw tx ${hash}`);
@@ -163,6 +213,8 @@ async function main() {
       const sinkBalance = await client.getBalance({ address: attackerSink });
       await writeArtifact(`battle-adversary-${MODE}`, {
         mode: MODE,
+        strategy,
+        attemptsQueued: sprayed,
         chainId: CHAIN_ID,
         eoa: account.address,
         attackerSink,
