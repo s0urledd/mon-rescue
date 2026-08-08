@@ -288,6 +288,8 @@ contract MonRescue {
         emit Rescued(SAFE_ADDRESS, amount, validatorCount);
     }
 
-    /// @dev Required so the account can receive the precompile's withdrawal payout.
+    /// @dev NOT required for the precompile's withdrawal payout — that is a raw balance credit
+    /// and runs no code (measured, FINDINGS Q21; the comment here previously claimed otherwise).
+    /// Kept because plain value transfers to the account are a CALL and would revert without it.
     receive() external payable {}
 }

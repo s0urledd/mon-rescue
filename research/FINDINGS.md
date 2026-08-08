@@ -563,7 +563,36 @@ sophisticated case, to be tested after the naive one. **It is the dominant case 
 compromised wallet arriving at our intake is more likely than not to be *already delegated to
 hostile code*.
 
-### The assumption this makes load-bearing, and it is untested
+### SETTLED — the payout is a raw credit, and the advantage holds
+
+Measured 2026-08-08 with `eth_call` + state override, so nothing was broadcast. The probe
+installs `0x60006000fd` (PUSH1 0, PUSH1 0, REVERT) as the victim's code — reverts on any
+invocation — and asks whether the precompile's payout trips it.
+
+| test | result |
+|---|---|
+| plain value transfer to the victim, no override | OK |
+| plain value transfer to the victim, **revert-code installed** | **REVERT** |
+| `claimRewards(40)` from the victim, delegated normally | OK |
+| `claimRewards(40)` from the victim, **revert-code installed** | **OK** |
+
+The second row is the positive control and it is what makes the fourth meaningful: the override
+*is* honoured, and a value-bearing CALL to an address with code *does* execute it. The precompile
+paying the same account does not.
+
+**So the payout is a raw balance credit. No recipient code runs.** Consequences:
+
+- An attacker with a sweeper delegated does **not** get an atomic drain. Their `withdraw()`
+  credits the EOA without triggering their own fallback, so they still need a second transaction
+  — and that gap is what `sweep()` takes. The advantage survives contact with the 97% pattern.
+- `MonRescue.receive()` is **not** required for the withdrawal payout, contrary to its comment.
+  Keep it for plain transfers; the stated reason was wrong.
+
+**Limits, stated:** measured via `claimRewards`, not `withdraw`, and via `eth_call` rather than a
+broadcast transaction. Both are documented as paying `msg.sender` by the same mechanism, but
+close it against `withdraw()` on the next matured slot before treating it as final.
+
+### The assumption as it stood before that measurement
 
 `MonRescue.sol` carries `receive() external payable {}` with the comment *"Required so the
 account can receive the precompile's withdrawal payout."* That comment asserts the staking

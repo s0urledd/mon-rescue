@@ -93,6 +93,7 @@ input is signatures made in their own wallet.
 | 7702-delegating **to the staking precompile** | *"all calls to it will revert"* — never do this |
 | `claimRewards()` gas | 155,375 — **70% of per-position cost**, usually not worth it |
 | Sweep to an EOA | ~0 gas |
+| Precompile payout | **raw balance credit, not a CALL** — recipient code does not run |
 | Reserve floor | `min(balance at start, 10 MON)` — applies to **every** EOA, not just delegated ones |
 | Emptying exception | the only way below the floor; needs **undelegated** + `k=3` quiet blocks. Our delegation closes it |
 | Value a delegated account may send | `balance − min(balance, 10 MON)` — **zero below 10 MON**, gas only |
@@ -208,13 +209,13 @@ not running.
 - **Boundary A/B contrast unmeasured.** `n+1` activation is confirmed; `n+2` is predicted from
   the same rule but never observed.
 - **Same-nonce replacement is undocumented on Monad.** Do not build on it.
-- **Is the precompile's payout a CALL or a raw credit?** UNVERIFIED, and load-bearing. If it is a
-  CALL it runs the recipient's delegated code, so an attacker with a sweeper delegated drains
-  **atomically** and the two-transaction gap `sweep()` exploits does not exist. Settle it by
-  delegating to a contract with a reverting `receive()` and calling `withdraw()`.
 - **The "sophisticated" attacker is the ordinary one.** ~97% of EIP-7702 delegations on mainnet
   four weeks after Pectra pointed at copy-pasted sweeper contracts (Wintermute, "CrimeEnjoyor").
   Assume an arriving victim is already delegated to hostile code.
+- ~~Is the payout a CALL or a raw credit?~~ **SETTLED: raw credit** (Q21). Recipient code does
+  not run, so a sweeper-delegated attacker gets no atomic drain and still needs a second
+  transaction. Verified against `claimRewards` with a working positive control; re-confirm
+  against `withdraw()` on the next matured slot.
 
 ---
 
