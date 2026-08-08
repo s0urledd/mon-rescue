@@ -248,7 +248,11 @@ async function main() {
     console.log(
       `\nclock started. Re-run arm to arm the rescue for epoch ${timing.maturityEpoch}.`,
     );
-    return;
+    // Exit rather than return. Reads go over a WebSocket, and an open socket keeps Node's event
+    // loop alive, so a bare `return` finishes the work and then hangs with nothing left to do —
+    // indistinguishable from a command that is still running. Every other terminal path here
+    // exits explicitly; this one was added without doing so.
+    process.exit(0);
   }
 
   // Batch everything maturing at the earliest epoch into ONE rescue() call. Positions maturing
