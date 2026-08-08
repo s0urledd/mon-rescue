@@ -208,6 +208,13 @@ not running.
 - **Boundary A/B contrast unmeasured.** `n+1` activation is confirmed; `n+2` is predicted from
   the same rule but never observed.
 - **Same-nonce replacement is undocumented on Monad.** Do not build on it.
+- **Is the precompile's payout a CALL or a raw credit?** UNVERIFIED, and load-bearing. If it is a
+  CALL it runs the recipient's delegated code, so an attacker with a sweeper delegated drains
+  **atomically** and the two-transaction gap `sweep()` exploits does not exist. Settle it by
+  delegating to a contract with a reverting `receive()` and calling `withdraw()`.
+- **The "sophisticated" attacker is the ordinary one.** ~97% of EIP-7702 delegations on mainnet
+  four weeks after Pectra pointed at copy-pasted sweeper contracts (Wintermute, "CrimeEnjoyor").
+  Assume an arriving victim is already delegated to hostile code.
 
 ---
 

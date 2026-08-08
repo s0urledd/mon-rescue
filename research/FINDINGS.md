@@ -549,6 +549,59 @@ Two further constraints that bite the hot path specifically:
 
 ---
 
+## Q21 — The ecosystem says our "sophisticated" attacker is the ordinary one
+
+Read after three battle tests, from public reporting rather than our own chain work.
+
+**Within four weeks of Pectra, ~97% of EIP-7702 delegations on Ethereum mainnet pointed at
+sweeper contracts** — Wintermute's "CrimeEnjoyor", all of them the same copy-pasted bytecode,
+verified by reversing it to Solidity. Scam Sniffer recorded a single 7702 transaction costing one
+victim >$150,000; Inferno Drainer took >$9M from 30,000+ wallets in six months.
+
+We have been treating "the attacker re-delegates the EOA to their own contract" as the
+sophisticated case, to be tested after the naive one. **It is the dominant case in the wild.** A
+compromised wallet arriving at our intake is more likely than not to be *already delegated to
+hostile code*.
+
+### The assumption this makes load-bearing, and it is untested
+
+`MonRescue.sol` carries `receive() external payable {}` with the comment *"Required so the
+account can receive the precompile's withdrawal payout."* That comment asserts the staking
+precompile pays `msg.sender` via a **CALL**, which executes the recipient's code. It has never
+been verified — Q1 passed with `receive()` present, so the alternative was never exercised.
+
+The two possibilities are not close:
+
+| if the payout is… | consequence |
+|---|---|
+| a **CALL** (runs recipient code) | an attacker with a sweeper delegated drains **atomically**: their `withdraw()` triggers their own fallback and forwards the funds in the same transaction. The two-transaction gap that `sweep()` exists to exploit **does not exist** against the 97% pattern |
+| a **raw balance credit** | no code runs on payout, the attacker still needs a second transaction, and our advantage holds |
+
+Everything the product claims against the *common* attacker rests on which of these is true, and
+we do not know. It is cheap to settle: delegate the victim to a contract whose `receive()`
+reverts, then call `withdraw()`. Revert means CALL; success means raw credit.
+
+**Do not claim the two-transaction advantage until this is measured.**
+
+### What else the comparison turned up
+
+`codeesura/eip7702-asset-rescuer` is the closest public prior art. It is a two-party design — the
+compromised wallet signs a batch payload offline, a sponsor broadcasts and pays gas — with
+`Tracker.sol` for anti-replay. Two differences worth stating:
+
+- **It has no destination lock.** The payload names its own recipients, so whoever holds the
+  signed payload chooses where the funds go. Ours cannot: `SAFE_ADDRESS` is immutable and no
+  function takes a recipient. For a one-off manual rescue their model is fine; for a *service*
+  holding many users' authorizations it is the difference between "a leak is nonce griefing" and
+  "a leak is theft".
+- **It documents no race defence at all** — no gas strategy, no pre-queuing, no private
+  orderflow. It is built for rescuing ERC20s and NFTs from a sweeper watching for gas, not for
+  winning a scheduled unlock against a funded adversary.
+
+So the racing machinery is ours to get right; there is no prior art to copy for it.
+
+---
+
 ## Q20 — The second battle test: we lost the position by declaring victory over dust
 
 **Epoch 1040, testnet.** Both sides pre-queued one attempt per block across the same 60-block
