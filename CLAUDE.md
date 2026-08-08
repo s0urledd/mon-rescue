@@ -93,7 +93,8 @@ input is signatures made in their own wallet.
 | 7702-delegating **to the staking precompile** | *"all calls to it will revert"* — never do this |
 | `claimRewards()` gas | 155,375 — **70% of per-position cost**, usually not worth it |
 | Sweep to an EOA | ~0 gas |
-| Reserve floor | `min(balance at start, 10 MON)` — strands only what was already there |
+| Reserve floor | `min(balance at start, 10 MON)` — applies to **every** EOA, not just delegated ones |
+| Emptying exception | the only way below the floor; needs **undelegated** + `k=3` quiet blocks. Our delegation closes it |
 | Value a delegated account may send | `balance − min(balance, 10 MON)` — **zero below 10 MON**, gas only |
 | Mainnet base fee | pinned at the 100 gwei floor |
 | Mainnet tips | p50 **2 gwei**, p90 78, **max observed 1,482** |

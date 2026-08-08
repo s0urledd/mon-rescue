@@ -931,7 +931,15 @@ The distinction that matters on-chain is:
 | **not 7702-delegated at all** | yes, after `k=3` quiet blocks | yes |
 | **delegated to anything** (ours or an attacker's) | **no** | no |
 
-So delegating a previously-undelegated wallet **imposes** the reserve floor on it. Our sweep
+**Correction, from reading the docs properly (2026-08-08).** An earlier version of this section
+said the reserve rule "only binds delegated accounts". It does not. The docs are explicit that it
+is universal — *"all EOAs must have enough MON in their account to pay for gas for any transaction
+included in the blockchain"* — and that what delegation removes is the **escape**:
+*"A transaction is an 'emptying transaction' iff the sender is undelegated"*, and
+*"Delegated EOAs cannot use the emptying exception described above."*
+
+The table above is still right; the reason underneath it was wrong. Delegating a wallet does not
+*impose* the floor — the floor was always there. It **closes the only door out of it**. Our sweep
 maths is unaffected — the floor is `min(balance at start, 10 MON)` and we take everything above
 it either way — but the user loses the ability to empty their own pre-existing balance while the
 delegation stands. Reversible by undelegating and waiting 3 quiet blocks, which is exactly what

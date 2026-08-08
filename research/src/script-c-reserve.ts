@@ -51,7 +51,7 @@ async function main() {
   console.log(`predicted sweepable = ${formatEther(planSweep(start, 0n).sweepable)} MON\n`);
 
   if (!isDelegated) {
-    throw new Error('EOA is not 7702-delegated — run script-a-7702 first, since the reserve rule only binds delegated accounts');
+    throw new Error('EOA is not 7702-delegated — run script-a-7702 first. The reserve rule binds ALL EOAs, but the emptying exception that escapes it is only available to undelegated ones, so a delegated account is what this measures.');
   }
 
   // --- case 1: end below the floor -> must revert ---------------------------
