@@ -263,8 +263,6 @@ async function main() {
   const batch = positions.filter((p) => p.maturesAt === targetEpoch);
   const later = positions.filter((p) => p.maturesAt !== targetEpoch);
   const totalAmount = batch.reduce((a, p) => a + p.amount, 0n);
-  // The bar for "rescue complete", computed here because the pre-arm simulation needs it too.
-  const doneThreshold = (totalAmount * 9n) / 10n;
 
   console.log(`\ntarget epoch ${targetEpoch}, ${batch.length} position(s), ${formatEther(totalAmount)} MON`);
   for (const p of batch) {
@@ -279,6 +277,20 @@ async function main() {
   // --- reserve check, now rather than as an on-chain revert ---------------
   const startBalance = await client.getBalance({ address: victim });
   const plan = planSweep(startBalance, totalAmount);
+  // The bar for "rescue complete". Computed here because the pre-arm simulation needs it, and
+  // computed this way because a plain percentage of the position is not enough.
+  //
+  // A pre-maturity attempt sweeps the victim's loose balance above the floor. That is correct
+  // and it is progress, but it is not the position — and at epoch 1040 a 1-wei bar let it read
+  // as completion, so the spray stopped on its first attempt and conceded 100 MON. Raising the
+  // bar to 90% of the position fixes that case only while the loose balance happens to be
+  // smaller than the position. It is not, here: 410 MON loose against a 100 MON position would
+  // clear a 90 MON bar on the premature sweep alone.
+  //
+  // So the bar is what a premature sweep delivers PLUS the position. Below it, only loose money
+  // has moved; above it, the position has. Independent of the ratio between them.
+  const prematureSweep = planSweep(startBalance, 0n).sweepable;
+  const doneThreshold = prematureSweep + (totalAmount * 9n) / 10n;
   console.log(`\nreserve floor ${formatEther(plan.floor)} MON, sweepable ${formatEther(plan.sweepable)} MON`);
   if (plan.stranded > 0n) {
     console.warn(`  ${formatEther(plan.stranded)} MON will be stranded; releasing it needs an ` +
@@ -498,8 +510,9 @@ async function main() {
   const isDone = makeSafeBalanceChecker(client, safeAddress, safeBaseline, doneThreshold);
   console.log(`safe baseline ${formatEther(safeBaseline)} MON`);
   console.log(
-    `  done when the safe gains >= ${formatEther(doneThreshold)} MON (90% of the position). ` +
-      `A premature sweep of loose balance is progress, not completion.`,
+    `  done when the safe gains >= ${formatEther(doneThreshold)} MON — ` +
+      `${formatEther(prematureSweep)} of loose balance plus 90% of the ${formatEther(totalAmount)} ` +
+      `MON position. A premature sweep alone is progress, not completion.`,
   );
 
   /**

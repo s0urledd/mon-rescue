@@ -99,7 +99,8 @@ export async function simulateRescuePaths(p: SimulateInput): Promise<PathCheck[]
     fatal: true,
     detail:
       `a pre-maturity attempt would move ${formatEther(prematureSweep)} MON (loose balance above ` +
-      `the floor); completion needs ${formatEther(p.doneThreshold)} MON` +
+      `the floor); completion needs ${formatEther(p.doneThreshold)} MON, i.e. that plus ` +
+      `${formatEther(p.doneThreshold - prematureSweep)} MON of the position` +
       (prematureSweep < p.doneThreshold
         ? ' — distinguishable'
         : ' — INDISTINGUISHABLE, the spray would stop on the first attempt'),
