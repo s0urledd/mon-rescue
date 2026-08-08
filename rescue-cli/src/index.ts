@@ -308,7 +308,12 @@ async function main() {
   // positions need ~776k, so the transaction ran out of gas and consumed the entire limit
   // producing nothing. Under-sizing is not a partial rescue, it is a total loss of the attempt.
   const claimRewardsToo = (process.env.CLAIM_REWARDS ?? 'auto') !== 'false';
-  const gasEstimate = estimateRescueGas(batch.length, claimRewardsToo);
+  // Authorization gas has to be known BEFORE the limit is sized, so the window is read here
+  // rather than after. Six tuples at 25,000 intrinsic gas each is 150,000 the limit would
+  // otherwise not cover — and intrinsic gas is checked before execution, so the transaction
+  // would not run at all.
+  const willCarryAuths = process.env.AUTH_WINDOW_FILE ? AUTHS_PER_ATTEMPT : 0;
+  const gasEstimate = estimateRescueGas(batch.length, claimRewardsToo, willCarryAuths);
   const gas = BigInt(process.env.GAS_LIMIT ?? gasEstimate.gasLimit);
   console.log(`\ngas limit ${gas}`);
   console.log(`  ${gasEstimate.breakdown}`);
@@ -407,11 +412,34 @@ async function main() {
   // Several are included because the attacker can bump the victim's nonce between now and the
   // flip; all of them name the same destination-locked contract, so whether one applies or all
   // do, the outcome is identical.
-  const authorizationList: SignedAuthorization[] | undefined = window
-    ? selectAuthorizations(window, victimNonce, AUTHS_PER_ATTEMPT)
-    : undefined;
-  if (authorizationList) {
-    console.log(`carrying ${authorizationList.length} authorization(s) per attempt`);
+  //
+  // The ranges MARCH FORWARD across the spray, and that is the point.
+  //
+  // A fixed list is dead the moment the attacker's nonce passes it. At epoch 1040 theirs went
+  // 23 -> 84 inside the flip window — 61 nonces — not to grief us but simply because they were
+  // pre-queuing too. An attempt signed to re-assert at nonces 23..28 is useless by the time the
+  // account sits at 84, so every remaining attempt in our spray would carry authorizations that
+  // can never apply, and a revoke seconds before the flip would be permanent.
+  //
+  // So attempt `i` covers nonces starting at `victimNonce + i`. The union across the spray
+  // spans the whole plausible range, whichever attempt is the one in the flip block. Wrong-nonce
+  // tuples are skipped rather than fatal ("continue to the next tuple in the list"), so the only
+  // cost of the ones that miss is gas we have already budgeted for.
+  const authsFor = (i: number): SignedAuthorization[] | undefined =>
+    window ? selectAuthorizations(window, victimNonce + i, AUTHS_PER_ATTEMPT) : undefined;
+  const authorizationList = authsFor(0);
+  if (authorizationList && window) {
+    const last = authsFor(attemptCount - 1) ?? [];
+    console.log(
+      `carrying ${AUTHS_PER_ATTEMPT} authorization(s) per attempt, ranges marching ` +
+        `${victimNonce}..${(last[last.length - 1]?.nonce as number) ?? victimNonce} across the spray`,
+    );
+    if (last.length === 0) {
+      console.warn(
+        `  WARN: the window runs out before the last attempt. The attacker can outlast it by ` +
+          `spending nonces — re-sign a wider window (AUTH_WINDOW_SIZE).`,
+      );
+    }
   }
 
   // --- pre-arm simulation --------------------------------------------------
@@ -469,7 +497,7 @@ async function main() {
         maxFeePerGas: step.maxFeePerGas,
         maxPriorityFeePerGas: step.maxPriorityFeePerGas,
         chain,
-        ...(authorizationList ? { authorizationList } : {}),
+        ...(() => { const a = authsFor(i); return a && a.length ? { authorizationList: a } : {}; })(),
       } as never),
     });
   }

@@ -335,7 +335,20 @@ export interface RescueGasEstimate {
  * the limit rather than the usage, so this is deliberately close to the real requirement with a
  * margin, not a round number chosen upward "to be safe".
  */
-export function estimateRescueGas(positionCount: number, claimRewards: boolean): RescueGasEstimate {
+/**
+ * Intrinsic gas charged per EIP-7702 authorization tuple carried in a transaction.
+ *
+ * Deliberately the higher of the figures in circulation (drafts said 25,000, the final spec
+ * lowered the base cost). Over-counting costs the difference; under-counting makes the
+ * transaction fail its intrinsic-gas check before it executes at all.
+ */
+export const PER_AUTHORIZATION_GAS = 25_000n;
+
+export function estimateRescueGas(
+  positionCount: number,
+  claimRewards: boolean,
+  authorizationCount = 0,
+): RescueGasEstimate {
   // Sized against the FAILURE case, not the success case. That distinction cost a battle test.
   //
   // The old version summed the measured successful costs (withdraw 68,675, claimRewards
@@ -363,7 +376,13 @@ export function estimateRescueGas(positionCount: number, claimRewards: boolean):
   // above the 100,000 the failed withdraw consumes — so the non-call overhead is ~45.5k, not the
   // ~37k the Ethereum-priced components would predict.
   const sweep = 20_000n;
-  const subtotal = baseTx + calldata + calls + contract + sweep;
+  // Authorizations are INTRINSIC gas, checked before execution begins. Carrying six of them at
+  // 25,000 each adds 150,000 that the rest of this calculation knows nothing about — so a limit
+  // sized without them is not merely tight, it fails the intrinsic check and the transaction
+  // never runs. This was missing entirely, and would have fired on the first run that loaded an
+  // authorization window.
+  const auths = PER_AUTHORIZATION_GAS * BigInt(Math.max(0, authorizationCount));
+  const subtotal = baseTx + calldata + calls + contract + sweep + auths;
   // 25% margin on top. Monad charges the limit rather than the usage, so a generous limit costs
   // real money on every attempt — but being short does not cost the difference, it costs the
   // position.
@@ -374,8 +393,9 @@ export function estimateRescueGas(positionCount: number, claimRewards: boolean):
     breakdown:
       `${positionCount} position(s) x ${perPosition} (worst case: withdraw ${WITHDRAW_GAS_CAP}` +
       `${claimRewards ? ` + claim ${CLAIM_GAS_CAP}` : ''} both failing at their cap) + ` +
-      `base ${baseTx} + calldata ${calldata} + contract ${contract} + sweep ${sweep} = ` +
-      `${subtotal}, +25% margin -> ${gasLimit}`,
+      `base ${baseTx} + calldata ${calldata} + contract ${contract} + sweep ${sweep}` +
+      (authorizationCount > 0 ? ` + ${authorizationCount} auth x ${PER_AUTHORIZATION_GAS}` : '') +
+      ` = ${subtotal}, +25% margin -> ${gasLimit}`,
   };
 }
 
