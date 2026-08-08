@@ -192,9 +192,14 @@ not running.
   where the epoch has flipped by definition and a failure is real evidence of a contest. The
   window fee anchors on p90 (×10), not the max observed bid — 10x an outlier across ~60 window
   attempts costs ~98 MON to cover a window that is usually uncontested.
-- **Battle test still unrun.** The epoch 1035 attempt measured nothing: every transaction we
-  sent was incapable of succeeding before it was broadcast (Q19). Re-run after redeploying —
-  the gas caps live in the contract.
+- **Battle test still unrun after three attempts.** Epoch 1035: every transaction we sent was
+  incapable of succeeding before broadcast (Q19). Epoch 1040: a 1-wei success threshold let a
+  premature sweep of loose balance read as a completed rescue, so we exited ten blocks before
+  the flip and conceded the position (Q20). Each run found a different defect on our side and
+  the auction has still decided nothing.
+- **A premature attempt is not a no-op.** It sweeps everything above the reserve floor, which is
+  correct and is *progress*, not completion. Any success test must be sized against the position
+  (`totalAmount`), never against "did the safe balance move".
 - **Giving up is now bounded, not automatic.** A reverted backstop used to exit the process. It
   now retries while any slot still holds a withdrawal request and the guardian can afford a
   shot, because `rescue()` sweeps regardless of whether the withdrawals succeed — so a revert

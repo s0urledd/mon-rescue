@@ -549,6 +549,63 @@ Two further constraints that bite the hot path specifically:
 
 ---
 
+## Q20 — The second battle test: we lost the position by declaring victory over dust
+
+**Epoch 1040, testnet.** Both sides pre-queued one attempt per block across the same 60-block
+window, both bidding **70 gwei**, gas now sized correctly at 438,750. The equal-fee, equal-strategy
+test — the hard half of the table, run for the first time.
+
+### The sequence
+
+| block | event |
+|---|---|
+| 51,954,952 | **our rescue succeeded** — but the epoch had not flipped. `withdraw()` failed, `_sweep()` moved the victim's loose 49.56 MON to the safe address. Receipt: 2 logs, `WithdrawFailed` then `Rescued` |
+| — | `isDone()` saw the safe balance rise, reported the rescue complete. Spray stopped at **1 of 62** attempts. `arm` printed "rescue landed" and **exited** |
+| ~51,954,99x | the attacker's queued withdraw landed after the flip and claimed the **100 MON** into the EOA, unopposed |
+| 51,955,003 | their fallback withdraw reverted — their own earlier attempt had already emptied the slot |
+| 51,955,005 | **their transfer succeeded: 98.24 MON** to the attacker's sink |
+
+Final: safe `+49.56`, attacker `+98.24`, victim left at the 9.996 MON floor.
+
+### Why: the success condition could not tell dust from the position
+
+`makeSafeBalanceChecker(..., 1n)` — **any** increase in the safe address balance counted as
+success.
+
+A pre-maturity attempt is not a no-op. `withdraw()` fails, but `_sweep()` still moves everything
+above the reserve floor, and that is correct: the money goes somewhere only the user controls.
+It is also, at a 1-wei threshold, indistinguishable from having claimed the position.
+
+So the first premature attempt swept 49.56 MON of loose balance, the run declared itself
+finished **ten blocks before the epoch flipped**, and stopped spraying. Everything downstream was
+correct and irrelevant — the gas fix worked, the window was covered, the fee was matched, and
+none of it mattered because the process had already exited.
+
+### The fix
+
+The threshold is now the **position**, not any movement: `totalAmount × 0.9`. A full rescue
+delivers roughly `victim balance + totalAmount − floor`; a premature dust sweep delivers
+`balance − floor`, smaller by exactly the position. Two other paths made the same mistake and
+were treating a successful *receipt* as a completed rescue — the single-attempt path and the
+backstop — and both now ask `isDone()` instead. `finish()` exits non-zero on a partial recovery,
+because a zero exit code is what a supervisor reads.
+
+### What this run does establish
+
+- The gas fix works. Our transaction executed and swept successfully at 438,750 where every
+  attempt at epoch 1035 died with `out of gas`.
+- The broadcast gate works: `holding broadcast until block 51954940` appears in the log, and no
+  gas was spent on the 40 blocks before the flip was possible.
+- The threat watcher works: it reported the attacker's nonce advancing 23 → 24 → 30 and the
+  balance falling, live, while they sprayed.
+- A competent attacker who sizes their transfer against the reserve floor **does** get the money
+  out. The epoch 1035 "win" was their arithmetic error, exactly as suspected.
+
+**Still unmeasured: who wins the flip block at an equal fee.** Three battle tests, three
+different defects on our side, and the auction has yet to decide anything.
+
+---
+
 ## Q19 — The first battle test: we lost, and not for any reason we were testing
 
 **Epoch 1035, testnet.** Both sides pre-signed, both bidding **75 gwei** — an equal-fee test.

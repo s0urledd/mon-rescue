@@ -463,8 +463,27 @@ async function main() {
   );
 
   const safeBaseline = await client.getBalance({ address: safeAddress });
-  const isDone = makeSafeBalanceChecker(client, safeAddress, safeBaseline, 1n);
+  // How much must arrive before the rescue is finished?
+  //
+  // This was 1 wei — any increase at all — and that lost the epoch 1040 battle test outright.
+  // A pre-maturity attempt does not do nothing: `withdraw()` fails, but `_sweep()` still moves
+  // the victim's liquid balance above the reserve floor to safety. That is correct behaviour,
+  // and it satisfied a 1-wei threshold. So the first premature attempt swept 49.56 MON of the
+  // victim's spare balance, `isDone()` reported success, the spray stopped after one attempt,
+  // `arm` printed "rescue landed" and exited — 10 blocks before the epoch flipped. The attacker's
+  // queued withdraw then claimed the whole 100 MON position unopposed.
+  //
+  // The threshold has to be the POSITION, not any movement. A full rescue delivers roughly
+  // `victim balance + totalAmount - floor`; a premature dust sweep delivers `balance - floor`,
+  // which is smaller by exactly the position. 90% of the position separates them with room for
+  // the balance drifting as the attacker spends gas.
+  const doneThreshold = (totalAmount * 9n) / 10n;
+  const isDone = makeSafeBalanceChecker(client, safeAddress, safeBaseline, doneThreshold);
   console.log(`safe baseline ${formatEther(safeBaseline)} MON`);
+  console.log(
+    `  done when the safe gains >= ${formatEther(doneThreshold)} MON (90% of the position). ` +
+      `A premature sweep of loose balance is progress, not completion.`,
+  );
 
   /**
    * Is there still anything to rescue?
@@ -510,7 +529,9 @@ async function main() {
     const final = await client.getBalance({ address: safeAddress });
     console.log(`\n${why}`);
     console.log(`safe address received ${formatEther(final - safeBaseline)} MON`);
-    process.exit(final > safeBaseline ? 0 : 1);
+    // Exit non-zero on a partial recovery. "We moved some money" is not success when the
+    // position is what we were sent to get, and a zero exit code is what a supervisor reads.
+    process.exit(final - safeBaseline >= doneThreshold ? 0 : 1);
   };
 
   // --- wait, then burst ---------------------------------------------------
@@ -634,7 +655,11 @@ async function main() {
       if (r.hash) {
         const receipt = await client.waitForTransactionReceipt({ hash: r.hash });
         console.log(`receipt ${receipt.status} in block ${receipt.blockNumber}`);
-        if (receipt.status === 'success') return finish('backstop landed.');
+        if (await isDone()) return finish('backstop landed.');
+        if (receipt.status === 'success') {
+          console.log(`backstop succeeded but the position is still pending — retrying.`);
+          continue;
+        }
 
         if (await positionsGone()) {
           return finish('backstop reverted and every slot is empty — the funds left without us.');
