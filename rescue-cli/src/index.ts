@@ -26,6 +26,7 @@ import {
 } from './preflight.js';
 import { selectAuthorizations, validateWindow, assessWindow, type AuthorizationWindow } from './authorization.js';
 import { observeFees, planFee, feeSchedule, maxSpendPerAttemptFromEnv } from './fees.js';
+import { simulateRescuePaths, reportChecks } from './simulate.js';
 import { isAbsolute, resolve } from 'node:path';
 
 /**
@@ -262,6 +263,8 @@ async function main() {
   const batch = positions.filter((p) => p.maturesAt === targetEpoch);
   const later = positions.filter((p) => p.maturesAt !== targetEpoch);
   const totalAmount = batch.reduce((a, p) => a + p.amount, 0n);
+  // The bar for "rescue complete", computed here because the pre-arm simulation needs it too.
+  const doneThreshold = (totalAmount * 9n) / 10n;
 
   console.log(`\ntarget epoch ${targetEpoch}, ${batch.length} position(s), ${formatEther(totalAmount)} MON`);
   for (const p of batch) {
@@ -399,7 +402,22 @@ async function main() {
     console.log(`carrying ${authorizationList.length} authorization(s) per attempt`);
   }
 
-  console.log(`pre-signing ${attemptCount} attempt(s) from nonce ${baseNonce}...`);
+  // --- pre-arm simulation --------------------------------------------------
+  // Run the failure branches now, against live state, for the cost of a few eth_calls. Each
+  // check below corresponds to a defect that has already lost a battle test.
+  if (process.env.SKIP_PREARM_SIM !== '1') {
+    reportChecks(await simulateRescuePaths({
+      client, guardian: guardian.address, victim,
+      validatorIds: batch.map((p) => p.validatorId),
+      withdrawIds: batch.map((p) => p.withdrawId),
+      claimRewards: claimRewardsToo,
+      gas, doneThreshold, totalAmount,
+    }));
+  } else {
+    console.warn(`\nSKIP_PREARM_SIM=1 — arming without checking the failure paths.`);
+  }
+
+  console.log(`\npre-signing ${attemptCount} attempt(s) from nonce ${baseNonce}...`);
   const t0 = Date.now();
   // How many attempts cover the flip window. Broadcasting starts at sprayStartBlockFor and the
   // epoch must have flipped by latestStartBlockFor, so that span divided by the broadcast
@@ -477,7 +495,6 @@ async function main() {
   // `victim balance + totalAmount - floor`; a premature dust sweep delivers `balance - floor`,
   // which is smaller by exactly the position. 90% of the position separates them with room for
   // the balance drifting as the attacker spends gas.
-  const doneThreshold = (totalAmount * 9n) / 10n;
   const isDone = makeSafeBalanceChecker(client, safeAddress, safeBaseline, doneThreshold);
   console.log(`safe baseline ${formatEther(safeBaseline)} MON`);
   console.log(

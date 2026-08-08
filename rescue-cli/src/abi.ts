@@ -1,5 +1,14 @@
 /** MonRescue contract ABI, kept in sync with contracts/src/MonRescue.sol. */
 export const MONRESCUE_ABI = [
+  // Errors first, and they are not decoration. Without them viem cannot decode a custom-error
+  // revert and reports "Execution reverted for an unknown reason" — which makes NothingToSweep
+  // (expected, benign) read identically to a real failure. The pre-arm simulation distinguishes
+  // fatal from harmless by error name, so omitting these turns every check into a coin flip.
+  { type: 'error', name: 'ZeroSafeAddress', inputs: [] },
+  { type: 'error', name: 'SafeAddressIsPrecompile', inputs: [] },
+  { type: 'error', name: 'LengthMismatch', inputs: [] },
+  { type: 'error', name: 'SweepFailed', inputs: [] },
+  { type: 'error', name: 'NothingToSweep', inputs: [] },
   {
     type: 'function',
     name: 'rescue',
