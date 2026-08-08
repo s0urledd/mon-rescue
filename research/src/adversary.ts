@@ -32,7 +32,7 @@ import { privateKeyToAccount } from 'viem/accounts';
 import {
   chainById, RPC_POOL, publicClientFor, STAKING_PRECOMPILE, STAKING_ABI,
   getEpoch, getWithdrawalRequest, isClaimable, advise, latestStartBlockFor, maturityEpoch,
-  sprayStartBlockFor,
+  sprayStartBlockFor, planSweep,
 } from '@monrescue/shared';
 import { writeArtifact, requireEnv } from './lib.js';
 
@@ -191,8 +191,25 @@ async function main() {
       let transferHash: string | undefined;
       let transferStatus: string | undefined;
       if (afterWithdraw > 0n) {
+        // Respect the reserve floor, because a competent attacker would.
+        //
+        // The previous version sent `balance - gas allowance`, which for a delegated EOA is more
+        // than the reserve rule permits: a delegated account may only send
+        // `balance - min(balance, 10 MON)`. At epoch 1035 that transfer reverted, and we recorded
+        // a win we had not earned — our own rescue was broken at the time and the only reason the
+        // funds stayed put was the attacker overreaching by 10 MON.
+        //
+        // An adversary that hands us the win by miscalculating measures nothing. This one takes
+        // the largest amount the chain will actually let it take, so the race that decides the
+        // test is our sweep against their transfer, not their arithmetic.
         const leave = 200_000n * maxFeePerGas;
-        const value = afterWithdraw > leave ? afterWithdraw - leave : 0n;
+        const allowedByReserve = planSweep(afterWithdraw, 0n).sweepable;
+        const afterGas = afterWithdraw > leave ? afterWithdraw - leave : 0n;
+        const value = afterGas < allowedByReserve ? afterGas : allowedByReserve;
+        console.log(
+          `  transfer sizing: balance ${formatEther(afterWithdraw)}, reserve allows ` +
+            `${formatEther(allowedByReserve)}, sending ${formatEther(value)} MON`,
+        );
         if (value > 0n) {
           try {
             const h = await wallet.sendTransaction({
