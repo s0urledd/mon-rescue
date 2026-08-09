@@ -549,6 +549,41 @@ Two further constraints that bite the hot path specifically:
 
 ---
 
+## Q22 — Monad caps the EIP-7702 authorization list, and does not say so
+
+Measured 2026-08-09 on testnet while arming for epoch 1046.
+
+| tuples in the list | result |
+|---|---|
+| 6 | **rejected** — `EIP7702 authorization list length limit exceeded` |
+| 4 | **accepted** — tx `0x91d2a808…`, block 52,172,718 |
+
+So the cap is 4 or 5; 5 is untested. The rejection happens at the RPC, before the transaction
+exists, so probing costs nothing.
+
+**It is not in the specification and not in the documentation.** EIP-7702 places no limit on the
+list. Monad's own EIP-7702 page documents the 10 MON balance rule and the `CREATE`/`CREATE2`
+restriction and says nothing about list length. It was found by a transaction being refused.
+
+### Why this did not break the anti-revoke defence
+
+Because the ranges already march. The authorization list carried by each spray attempt starts at
+`victimNonce + i`, so a 64-attempt spray at 4 tuples each covers nonces **91..157** — 67
+consecutive nonces from a 256-nonce window. The attacker at epoch 1040 burned 61 nonces in a
+single flip window, so that is the coverage that matters.
+
+Had the list stayed fixed — every attempt re-asserting at the same 4 nonces, as it did until the
+day before — this cap would have reduced the defence to four specific nonces and any attacker
+spraying through the window would have walked past it. The marching design was written for a
+different reason and happens to absorb this one.
+
+**Consequence for sizing:** `AUTHS_PER_ATTEMPT` cannot be raised to buy coverage. Coverage comes
+from attempt count times list length, and the second factor is capped by the chain. More
+coverage means more attempts, which costs gas per attempt, which is bounded by the inflight cap.
+Worth remembering before assuming the window can simply be widened.
+
+---
+
 ## Q21 — The ecosystem says our "sophisticated" attacker is the ordinary one
 
 Read after three battle tests, from public reporting rather than our own chain work.

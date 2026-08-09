@@ -91,6 +91,7 @@ input is signatures made in their own wallet.
 | Memory expansion | linear `w/2`, not Ethereum's quadratic |
 | Inflight gas budget | `min(user_reserve_balance, lagged balance)` over `k` blocks — docs confirm |
 | 7702-delegating **to the staking precompile** | *"all calls to it will revert"* — never do this |
+| Authorization list length | capped at **4 or 5** (6 rejected, 4 accepted). Undocumented, RPC-enforced |
 | `claimRewards()` gas | 155,375 — **70% of per-position cost**, usually not worth it |
 | Sweep to an EOA | ~0 gas |
 | Precompile payout | **raw balance credit, not a CALL** — recipient code does not run |
