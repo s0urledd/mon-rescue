@@ -159,6 +159,15 @@ async function main() {
       );
     }
     console.log(`atomic mode: will self-delegate to drainer ${drainerAddr} and drain() in one tx`);
+    console.log(
+      `\n  CAVEAT: react strategy reaches only block N+1 — the epoch advances in tx 0 of the flip\n` +
+        `  block, so a reaction cannot land in N, while our arm pre-queues INTO N. So a WIN here is\n` +
+        `  not evidence we beat an atomic attacker: we would be winning on the one-block pre-queue\n` +
+        `  edge this react adversary structurally lacks. A LOSS is meaningful (we lost to a slower\n` +
+        `  attacker); a win is not. The conclusive atomic test needs ADVERSARY_STRATEGY=prequeue,\n` +
+        `  which is gated until the self-auth nonce and reverted-drain delegation survival are\n` +
+        `  measured on-chain.`,
+    );
   }
 
   const signWithdraw = (nonce: number) => wallet.signTransaction({
@@ -168,9 +177,16 @@ async function main() {
 
   // One atomic drain: sign a self-authorization to the drainer (nonce = txNonce + 1) and call
   // drain() on our own address, which now runs the drainer's code.
+  //
+  // The auth nonce is passed EXPLICITLY as txNonce + 1 rather than left for viem to fetch. viem's
+  // prepareAuthorization otherwise reads getTransactionCount at blockTag 'pending' and adds 1 for
+  // executor:'self' — but the transaction's own nonce here is read at 'latest', so with anything
+  // pending the two would disagree and the authorization would not apply. Deriving both from the
+  // same txNonce removes that mismatch and a network round-trip, and documents the +1 rule at the
+  // call site where it is easy to check.
   const signAtomicDrain = async (txNonce: number) => {
     const authorization = await wallet.signAuthorization({
-      account, contractAddress: drainerAddr!, executor: 'self',
+      account, contractAddress: drainerAddr!, executor: 'self', nonce: txNonce + 1,
     });
     return wallet.signTransaction({
       to: account.address, data: drainData, nonce: txNonce,
@@ -196,6 +212,11 @@ async function main() {
     console.log(`withdraw pre-signed at nonce ${baseNonce} (react: fires on detection)`);
   }
 
+  // Baseline the attacker sink before firing. ATTACKER_SINK is reused across battle tests and
+  // already holds funds from earlier runs (98.24 MON after epoch 1040), so its ABSOLUTE balance
+  // says nothing about what this run took. Only the delta does — the same reason arm measures the
+  // safe address against a baseline rather than an absolute.
+  const sinkBaseline = await client.getBalance({ address: attackerSink });
   console.log(`waiting for epoch ${targetEpoch}...`);
   const t0 = Date.now();
   let sprayed = 0;
@@ -232,13 +253,16 @@ async function main() {
           const r = await client.waitForTransactionReceipt({ hash });
           console.log(`atomic drain ${r.status} in block ${r.blockNumber}`);
           const sinkBalance = await client.getBalance({ address: attackerSink });
+          const drained = sinkBalance - sinkBaseline;
           const codeAfter = await client.getCode({ address: account.address });
-          console.log(`attacker sink balance: ${formatEther(sinkBalance)} MON`);
+          console.log(`attacker took this run: ${formatEther(drained)} MON (sink ${formatEther(sinkBaseline)} -> ${formatEther(sinkBalance)})`);
           console.log(`victim delegation after: ${codeAfter && codeAfter.length === 48 ? '0x' + codeAfter.slice(8) : 'none'}`);
           await writeArtifact(`battle-adversary-atomic`, {
             mode: MODE, strategy, drainer: drainerAddr,
             drainTx: hash, drainStatus: r.status, drainBlock: r.blockNumber.toString(),
+            attackerSinkBaseline: sinkBaseline.toString(),
             attackerSinkBalance: sinkBalance.toString(),
+            attackerDrainedThisRun: drained.toString(),
             victimDelegationAfter: codeAfter,
           });
         }
