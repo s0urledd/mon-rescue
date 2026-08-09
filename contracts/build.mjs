@@ -30,11 +30,18 @@ try {
   );
   process.exit(1);
 }
-const source = readFileSync(join(HERE, 'src', 'MonRescue.sol'), 'utf8');
+// Both the product contract and the adversary simulator. The second is a test harness — see
+// its header — and is compiled here only so the battle test has a real opponent to run against.
+const CONTRACTS = [
+  { file: 'MonRescue.sol', name: 'MonRescue' },
+  { file: 'AdversaryDrainer.sol', name: 'AdversaryDrainer' },
+];
 
 const input = {
   language: 'Solidity',
-  sources: { 'MonRescue.sol': { content: source } },
+  sources: Object.fromEntries(
+    CONTRACTS.map((c) => [c.file, { content: readFileSync(join(HERE, 'src', c.file), 'utf8') }]),
+  ),
   settings: {
     optimizer: { enabled: true, runs: 200 },
     // Monad is Cancun-equivalent for general execution; EIP-7702 affects transaction
@@ -53,23 +60,25 @@ for (const err of output.errors ?? []) {
 }
 if (failed) process.exit(1);
 
-const contract = output.contracts['MonRescue.sol'].MonRescue;
 mkdirSync(join(HERE, 'out'), { recursive: true });
-writeFileSync(
-  join(HERE, 'out', 'MonRescue.json'),
-  JSON.stringify(
-    {
-      contractName: 'MonRescue',
-      solcVersion: solc.version(),
-      abi: contract.abi,
-      bytecode: `0x${contract.evm.bytecode.object}`,
-      deployedBytecode: `0x${contract.evm.deployedBytecode.object}`,
-    },
-    null,
-    2,
-  ) + '\n',
-);
-
 console.log(`compiled with solc ${solc.version()}`);
-console.log(`deployed size: ${contract.evm.deployedBytecode.object.length / 2} bytes`);
-console.log(`artifact -> contracts/out/MonRescue.json`);
+for (const { file, name } of CONTRACTS) {
+  const contract = output.contracts[file][name];
+  writeFileSync(
+    join(HERE, 'out', `${name}.json`),
+    JSON.stringify(
+      {
+        contractName: name,
+        solcVersion: solc.version(),
+        abi: contract.abi,
+        bytecode: `0x${contract.evm.bytecode.object}`,
+        deployedBytecode: `0x${contract.evm.deployedBytecode.object}`,
+      },
+      null,
+      2,
+    ) + '\n',
+  );
+  console.log(
+    `  ${name}: ${contract.evm.deployedBytecode.object.length / 2} bytes -> contracts/out/${name}.json`,
+  );
+}

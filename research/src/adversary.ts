@@ -126,10 +126,58 @@ async function main() {
   const strategy = (process.env.ADVERSARY_STRATEGY ?? 'react').toLowerCase();
   const baseNonce = await client.getTransactionCount({ address: account.address });
 
+  // MODE=atomic: the re-delegating sweeper — the common case, not the sophisticated one.
+  //
+  // Instead of withdraw-then-transfer in two transactions, it self-delegates the EOA to an
+  // attacker drainer and calls drain() in ONE type-0x04 transaction. There is then no block in
+  // which the withdrawn MON sits on the EOA for our sweep to take. Against this, our advantage is
+  // not the two-transaction gap — it is the authorization window, which re-asserts our delegation
+  // inside our own rescue transaction and undoes theirs.
+  //
+  // Self-sponsored 7702 nonce rule, stated because it is easy to get wrong and we do not guess:
+  // the transaction consumes the sender's current nonce, THEN the authorization is checked, so a
+  // self-authorization must carry nonce = txNonce + 1. viem's `executor: 'self'` sets this. We
+  // verify it on-chain (deploy-drainer + a single atomic drain on a matured slot) before trusting
+  // a pre-queued atomic spray, which is why atomic starts in react mode only.
+  const drainerAddr = process.env.ADVERSARY_DRAINER as `0x${string}` | undefined;
+  const drainData = encodeFunctionData({
+    abi: [{
+      type: 'function', name: 'drain', stateMutability: 'nonpayable',
+      inputs: [{ name: 'validatorIds', type: 'uint64[]' }, { name: 'withdrawIds', type: 'uint8[]' }],
+      outputs: [],
+    }],
+    functionName: 'drain', args: [[validatorId], [withdrawId]],
+  });
+
+  if (MODE === 'atomic') {
+    if (!drainerAddr) throw new Error('MODE=atomic needs ADVERSARY_DRAINER (run deploy:drainer)');
+    if (strategy === 'prequeue') {
+      throw new Error(
+        'atomic + prequeue is not yet verified: the self-authorization nonce (txNonce+1) and ' +
+          'whether the delegation survives a reverted premature drain must be measured first. ' +
+          'Run MODE=atomic with the default react strategy.',
+      );
+    }
+    console.log(`atomic mode: will self-delegate to drainer ${drainerAddr} and drain() in one tx`);
+  }
+
   const signWithdraw = (nonce: number) => wallet.signTransaction({
     to: STAKING_PRECOMPILE, data: withdrawData, nonce,
     gas: 200_000n, maxFeePerGas, maxPriorityFeePerGas, chain,
   });
+
+  // One atomic drain: sign a self-authorization to the drainer (nonce = txNonce + 1) and call
+  // drain() on our own address, which now runs the drainer's code.
+  const signAtomicDrain = async (txNonce: number) => {
+    const authorization = await wallet.signAuthorization({
+      account, contractAddress: drainerAddr!, executor: 'self',
+    });
+    return wallet.signTransaction({
+      to: account.address, data: drainData, nonce: txNonce,
+      gas: 400_000n, maxFeePerGas, maxPriorityFeePerGas, chain,
+      authorizationList: [authorization],
+    } as never);
+  };
 
   let queued: `0x${string}`[] = [];
   if (strategy === 'prequeue') {
@@ -168,6 +216,35 @@ async function main() {
     }
 
     if (isClaimable(epoch, activationEpoch)) {
+      // Atomic path: one transaction claims and moves, so there is nothing to sweep in between.
+      if (MODE === 'atomic') {
+        console.log(`\nepoch ${epoch.epoch} at block ${block} — FIRING atomic drain`);
+        const nonce = await client.getTransactionCount({ address: account.address });
+        const raw = await signAtomicDrain(nonce);
+        let hash: `0x${string}` | undefined;
+        try {
+          hash = await client.request({ method: 'eth_sendRawTransaction', params: [raw] } as never) as `0x${string}`;
+        } catch (e) {
+          console.log(`atomic drain rejected: ${(e as Error).message.split('\n')[0]}`);
+        }
+        console.log(`atomic drain tx ${hash ?? 'REJECTED'}`);
+        if (hash) {
+          const r = await client.waitForTransactionReceipt({ hash });
+          console.log(`atomic drain ${r.status} in block ${r.blockNumber}`);
+          const sinkBalance = await client.getBalance({ address: attackerSink });
+          const codeAfter = await client.getCode({ address: account.address });
+          console.log(`attacker sink balance: ${formatEther(sinkBalance)} MON`);
+          console.log(`victim delegation after: ${codeAfter && codeAfter.length === 48 ? '0x' + codeAfter.slice(8) : 'none'}`);
+          await writeArtifact(`battle-adversary-atomic`, {
+            mode: MODE, strategy, drainer: drainerAddr,
+            drainTx: hash, drainStatus: r.status, drainBlock: r.blockNumber.toString(),
+            attackerSinkBalance: sinkBalance.toString(),
+            victimDelegationAfter: codeAfter,
+          });
+        }
+        return;
+      }
+
       console.log(`\nepoch ${epoch.epoch} at block ${block} — FIRING withdraw`);
       // In prequeue mode the winning attempt is already in flight; this is the fallback for a
       // window that ran dry, and it signs fresh at whatever nonce is now current.
