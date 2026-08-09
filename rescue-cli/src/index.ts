@@ -258,13 +258,39 @@ async function main() {
         console.warn(`  no usable authorization window: ${(e as Error).message.split('\n')[0]}`);
       }
     }
-    const unbondGas = 200_000n * BigInt(active.length + 1)
-      + PER_AUTHORIZATION_GAS * BigInt(unbondAuths?.length ?? 0);
-    const hash = await wallet.sendTransaction({
-      to: victim, data: unbondData, gas: unbondGas, chain,
-      ...(unbondAuths && unbondAuths.length ? { authorizationList: unbondAuths } : {}),
-    } as never);
-    const receipt = await client.waitForTransactionReceipt({ hash });
+    // Monad caps the authorization list length and does not document the number. Six is
+    // rejected outright with "EIP7702 authorization list length limit exceeded", at the RPC,
+    // before the transaction exists — so it costs nothing to discover, but it must be
+    // discovered rather than assumed. Step down until one is accepted and remember the answer.
+    let hash: `0x${string}` | undefined;
+    let auths = unbondAuths ?? [];
+    for (;;) {
+      const unbondGas = 200_000n * BigInt(active.length + 1)
+        + PER_AUTHORIZATION_GAS * BigInt(auths.length);
+      try {
+        hash = await wallet.sendTransaction({
+          to: victim, data: unbondData, gas: unbondGas, chain,
+          ...(auths.length ? { authorizationList: auths } : {}),
+        } as never);
+        break;
+      } catch (e) {
+        const m = (e as Error).message;
+        if (/authorization list length limit/i.test(m) && auths.length > 0) {
+          auths = auths.slice(0, Math.max(0, Math.floor(auths.length / 2)));
+          console.log(`  list too long for this chain — retrying with ${auths.length}`);
+          continue;
+        }
+        throw e;
+      }
+    }
+    if (auths.length !== (unbondAuths?.length ?? 0)) {
+      console.log(
+        `\n  NOTE: this chain accepted ${auths.length} authorization(s), not ` +
+          `${unbondAuths?.length ?? 0}. Set AUTHS_PER_ATTEMPT=${auths.length} for the arm run so ` +
+          `the spray is sized to what the node will actually take.`,
+      );
+    }
+    const receipt = await client.waitForTransactionReceipt({ hash: hash! });
     console.log(`  ${hash} -> ${receipt.status} in block ${receipt.blockNumber}`);
     if (receipt.status !== 'success') {
       throw new Error('startUnbonding reverted — check UNBOND_SLOT is free and stake is activated');
