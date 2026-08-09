@@ -264,6 +264,15 @@ async function main() {
             attackerSinkBalance: sinkBalance.toString(),
             attackerDrainedThisRun: drained.toString(),
             victimDelegationAfter: codeAfter,
+            // Carry the interpretation limit INTO the record, not just the console. react reaches
+            // only N+1, so a drain revert here is not evidence we beat an atomic attacker — only a
+            // successful drain is meaningful. Without this a later reader sees drainStatus
+            // 'reverted' + our delegation intact and marks the conclusive test done on nothing.
+            conclusive: strategy === 'prequeue',
+            note: strategy === 'prequeue'
+              ? 'prequeue: both sides can reach the flip block; result is meaningful either way'
+              : 'react reaches only N+1 while arm pre-queues into N — a drain REVERT proves nothing; '
+                + 'only a successful drain is meaningful. Conclusive atomic test needs ADVERSARY_STRATEGY=prequeue.',
           });
         }
         return;

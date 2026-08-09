@@ -549,6 +549,71 @@ Two further constraints that bite the hot path specifically:
 
 ---
 
+## Q23 — Building the atomic adversary, and a viem nonce trap that would have faked a win
+
+The atomic re-delegating sweeper is the common attacker (Q21: ~97% of mainnet 7702 delegations).
+`AdversaryDrainer.sol` is that opponent — a mirror of the rescue path with an immutable `SINK`
+instead of `SAFE_ADDRESS`, so it is a fair adversary and cannot become a weapon (no recipient
+parameter; only reachable by delegating an account whose key you already hold). `MODE=atomic`
+self-delegates the victim to it and calls `drain()` in one type-0x04 transaction, leaving no
+block in which the withdrawn MON sits on the EOA for our sweep. Against this our advantage is not
+the two-transaction gap — it is the authorization window undoing their re-delegation inside our
+own rescue.
+
+The commit was reviewed line by line (once by hand, once by a 20-agent adversarial workflow) and
+six real issues surfaced, all now fixed. Two are worth keeping.
+
+### The viem `executor: 'self'` nonce trap — latest vs pending
+
+A self-sponsored 7702 transaction must carry an authorization whose nonce is `txNonce + 1`: the
+transaction consumes the sender's current nonce, *then* the authorization is validated. The first
+cut trusted viem's `executor: 'self'` to set this. It does not set it against your transaction's
+nonce. Verified against installed viem 2.55.10 (`_cjs/actions/wallet/prepareAuthorization.js`):
+
+- the transaction nonce came from `getTransactionCount` at **`blockTag: 'latest'`**;
+- `prepareAuthorization` fills the authorization nonce from its **own independent**
+  `getTransactionCount` at **`blockTag: 'pending'`**, then `+1` for `executor: 'self'`. It never
+  reads the `txNonce` you pass to `signTransaction`.
+
+So `authNonce == txNonce + 1` holds **only when `pending == latest`**. Any single unconfirmed
+transaction from the account at fire time makes `pending = latest + 1`; the transaction consumes
+`latest` (account → `latest+1`), the authorization carries `latest+2 ≠ latest+1`, and per
+EIP-7702 the tuple is **invalid and silently skipped while the transaction still returns
+`status: success`.** The EOA is never delegated to the drainer, `drain()` never runs, nothing
+moves — and the harness would have written `drainStatus: success`, recording a fired-and-took-
+nothing adversary as if it had run. That is the epoch-1035 class of unearned result, in the
+opponent this time. Fixed by passing the authorization nonce explicitly as `txNonce + 1`, derived
+from the same `latest` read as the transaction.
+
+The lesson generalises past this repo: **do not let a signing helper fetch its own nonce when a
+sibling call fetches one too.** Read once, derive both.
+
+### A react-mode adversary can only ever demonstrate a loss
+
+`MODE=atomic` with the default `react` strategy fires on detection, which reaches only block
+**N+1** — the epoch advances in tx 0 of the flip block, so a reaction cannot land in N, while
+`arm` pre-queues into N. So a **win** in atomic-react is not evidence we beat an atomic attacker;
+it is the one-block pre-queue edge the react adversary structurally lacks. Only a **loss** is
+meaningful there. The console says this, and — because a stored artifact outlives the console and
+gets over-read — the artifact now carries `conclusive: false` and a `note` whenever
+`strategy === 'react'`, so a later reader cannot mark the conclusive test done on a drain revert
+that proves nothing. The conclusive atomic test needs `ADVERSARY_STRATEGY=prequeue`, still gated
+until the reverted-drain delegation-survival question is measured on-chain.
+
+### The other four, briefly (all fixed)
+
+- Atomic artifact recorded the sink's **absolute** balance; `ATTACKER_SINK` accumulates across
+  runs (98 MON since epoch 1040), so it now records the **delta**.
+- `deploy:drainer` did not rebuild the contract artifact first — the stale-`dist` failure class
+  that has already cost a rescue. It now runs `contracts/build.mjs` before deploying. (`deploy:contract`
+  for MonRescue has the same latent gap and should get the same treatment.)
+- `deploy-drainer` logged a `SINK` mismatch but exited 0 and wrote a success artifact, unlike
+  `deploy.ts`. It now throws.
+- A solc shadow warning (`bool ok` declared twice) that could mask a future real warning —
+  renamed.
+
+---
+
 ## Q22 — Monad caps the EIP-7702 authorization list, and does not say so
 
 Measured 2026-08-09 on testnet while arming for epoch 1046.

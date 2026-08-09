@@ -63,12 +63,12 @@ contract AdversaryDrainer {
             // Return value ignored on purpose, and a real sweeper does the same: if the slot is
             // already empty the funds may still be sitting on the account, and the transfer
             // below is what actually matters.
-            (bool ok,) = STAKING_PRECOMPILE.call{gas: WITHDRAW_GAS_CAP}(
+            (bool wOk,) = STAKING_PRECOMPILE.call{gas: WITHDRAW_GAS_CAP}(
                 abi.encodeWithSignature(
                     "withdraw(uint64,uint8)", validatorIds[i], withdrawIds[i]
                 )
             );
-            ok;
+            wOk;
         }
 
         uint256 floor = startingBalance < 10 ether ? startingBalance : 10 ether;

@@ -207,6 +207,13 @@ not running.
   now retries while any slot still holds a withdrawal request and the guardian can afford a
   shot, because `rescue()` sweeps regardless of whether the withdrawals succeed — so a revert
   means the money has not arrived *yet* at least as often as it means it is gone.
+- **Atomic adversary built, conclusive run still pending.** `AdversaryDrainer` + `MODE=atomic`
+  mirror the common (~97%) re-delegating sweeper. `react` mode only reaches N+1, so a win there
+  proves nothing — the meaningful test is `ADVERSARY_STRATEGY=prequeue`, gated until reverted-drain
+  delegation survival is measured. See Q23.
+- **viem `executor: 'self'` does NOT tie the auth nonce to your tx nonce** — it fetches its own at
+  `blockTag: 'pending'`. Always pass the authorization nonce explicitly as `txNonce + 1`. A silent
+  skip here writes `status: success` while nothing ran (Q23).
 - **Boundary A/B contrast unmeasured.** `n+1` activation is confirmed; `n+2` is predicted from
   the same rule but never observed.
 - **Same-nonce replacement is undocumented on Monad.** Do not build on it.

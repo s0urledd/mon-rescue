@@ -62,7 +62,13 @@ async function main() {
     address, abi: artifact.abi as never, functionName: 'SINK',
   })) as string);
   console.log(`deployed at: ${address}`);
-  console.log(`on-chain SINK: ${onchainSink} ${onchainSink === sink ? '(ok)' : '!! MISMATCH'}`);
+  const sinkOk = onchainSink === sink;
+  console.log(`on-chain SINK: ${onchainSink} ${sinkOk ? '(ok)' : '!! MISMATCH'}`);
+  // Throw rather than fall through to a success footer with exit code 0, as deploy.ts does for
+  // its destination lock. A drainer whose SINK does not match what was asked for is not a usable
+  // opponent — a mismatch means an encoding regression or a tampered artifact, and a subsequent
+  // atomic battle test would trust a contract that sends somewhere unexpected.
+  if (!sinkOk) throw new Error('on-chain SINK does not match ATTACKER_SINK — do not use this drainer');
 
   console.log(`\nAdd to .env for MODE=atomic:\n  echo "ADVERSARY_DRAINER=${address}" >> .env`);
   await writeArtifact(`deploy-drainer-${CHAIN_ID}`, { address, sink, deployTx: hash });
