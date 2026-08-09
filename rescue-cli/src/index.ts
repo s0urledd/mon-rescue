@@ -14,7 +14,7 @@ import {
   earliestStartBlockFor, latestStartBlockFor, sprayStartBlockFor,
   localFirstClient, transportConfigFromEnv,
   detectLocalNode,
-  discoverUnstakes, validatorIdsFrom, estimateRescueGas,
+  discoverUnstakes, validatorIdsFrom, estimateRescueGas, PER_AUTHORIZATION_GAS,
 } from '@monrescue/shared';
 import { MONRESCUE_ABI } from './abi.js';
 import { broadcastEverywhere } from './broadcast.js';
@@ -238,8 +238,31 @@ async function main() {
       functionName: 'startUnbonding',
       args: [active.map((p) => p.validatorId), slot],
     });
+    // Carry authorizations here too. A user arriving with active stake is, per the mainnet
+    // data, more likely than not ALREADY delegated to a sweeper — so this call would be a call
+    // into the attacker's code rather than ours, and it would simply not work. The authorization
+    // list is processed before the top-level call, so re-asserting our delegation and starting
+    // the unbonding happens in one transaction.
+    let unbondAuths: SignedAuthorization[] | undefined;
+    if (process.env.AUTH_WINDOW_FILE) {
+      try {
+        const w = JSON.parse(
+          readFileSync(resolveFromRepoRoot(process.env.AUTH_WINDOW_FILE), 'utf8'),
+        ) as AuthorizationWindow;
+        validateWindow(w, CHAIN_ID, rescueContract);
+        unbondAuths = selectAuthorizations(
+          w, await client.getTransactionCount({ address: victim }), AUTHS_PER_ATTEMPT,
+        );
+        console.log(`  carrying ${unbondAuths.length} authorization(s) to re-assert delegation`);
+      } catch (e) {
+        console.warn(`  no usable authorization window: ${(e as Error).message.split('\n')[0]}`);
+      }
+    }
+    const unbondGas = 200_000n * BigInt(active.length + 1)
+      + PER_AUTHORIZATION_GAS * BigInt(unbondAuths?.length ?? 0);
     const hash = await wallet.sendTransaction({
-      to: victim, data: unbondData, gas: 200_000n * BigInt(active.length + 1), chain,
+      to: victim, data: unbondData, gas: unbondGas, chain,
+      ...(unbondAuths && unbondAuths.length ? { authorizationList: unbondAuths } : {}),
     } as never);
     const receipt = await client.waitForTransactionReceipt({ hash });
     console.log(`  ${hash} -> ${receipt.status} in block ${receipt.blockNumber}`);
