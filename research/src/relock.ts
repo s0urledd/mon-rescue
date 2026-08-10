@@ -86,9 +86,24 @@ async function main() {
 
   console.log(`waiting for the flip window...`);
   let fired = 0;
+  let lastLog = 0n;
   for (;;) {
-    const block = await client.getBlockNumber();
-    const epoch = await getEpoch(client);
+    // Guard the poll reads. This loop runs for HOURS before the window arrives — at 50ms that is
+    // ~half a million RPC calls, and a single transient failure over that span used to throw an
+    // unhandled rejection that killed the process before it ever fired. That is exactly how a
+    // long-idle waiter dies silently: it looks armed, then the flip comes and nothing happens.
+    // arm's poll loop guards this; this one did not, and a re-run confirmed relock never
+    // broadcast. Retry on error, never crash.
+    let block: bigint, epoch: Awaited<ReturnType<typeof getEpoch>>;
+    try {
+      block = await client.getBlockNumber();
+      epoch = await getEpoch(client);
+    } catch (e) {
+      if (process.env.DEBUG) console.error(`poll: ${(e as Error).message.split('\n')[0]}`);
+      await sleep(500);
+      continue;
+    }
+
     if (block >= sprayStart && (RELOCK_MODE === 'grief' || fired === 0)) {
       if (fired === 0 || block % BigInt(RELOCK_EVERY) === 0n) {
         try { await relock(); fired++; } catch (e) { console.log(`  relock failed: ${(e as Error).message.split('\n')[0]}`); }
@@ -96,7 +111,16 @@ async function main() {
       }
     }
     if (epoch.epoch > target_epoch || block > latestStart + 200n) break;
-    await sleep(POLL_MS);
+
+    // Poll slowly when far from the window, fast inside it. Hammering the node at 50ms for hours
+    // is both wasteful and the thing that made a transient error likely in the first place.
+    const toWindow = sprayStart - block;
+    if (toWindow > 200n) {
+      if (block - lastLog >= 2000n) { console.log(`[idle] ${toWindow} blocks to the flip window`); lastLog = block; }
+      await sleep(15_000);
+    } else {
+      await sleep(POLL_MS);
+    }
   }
   console.log(`\ndone — fired ${fired} re-delegation(s). Now check whether arm still rescued: the`);
   console.log(`safe address balance is the answer, and 'THREAT delegation_changed' should appear in`);
