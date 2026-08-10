@@ -71,8 +71,33 @@ const SECONDS_PER_BLOCK = Number(process.env.SECONDS_PER_BLOCK ?? 0.301);
 const SPRAY_BLOCKS_PER_ATTEMPT = Number(process.env.SPRAY_BLOCKS_PER_ATTEMPT ?? 1);
 const SPRAY_MAX_IN_FLIGHT = Number(process.env.SPRAY_MAX_IN_FLIGHT ?? 4);
 const SLOTS_TO_PROBE = Number(process.env.SLOTS_TO_PROBE ?? 32);
+
+/**
+ * Monad's observed cap on the EIP-7702 authorization list length (Q22): 6 is rejected outright
+ * ("EIP7702 authorization list length limit exceeded"), 4 is accepted. The cap is undocumented
+ * and RPC-enforced, and — this is the trap — it is enforced at `sendRawTransaction`, not at
+ * `eth_call`, so the pre-arm simulation cannot catch it. If arm pre-signed 64 spray attempts each
+ * carrying 6 authorizations, EVERY one would be rejected at broadcast, at the flip, with nothing
+ * queued. That is the worst possible moment to discover a chain constant.
+ *
+ * So the count is clamped to a known-accepted value here rather than defaulted to something the
+ * chain refuses. 4 is the measured ceiling; below it costs a little coverage depth per attempt,
+ * which the marching ranges make up for across the spray.
+ */
+const AUTH_LIST_CAP = Number(process.env.AUTH_LIST_CAP ?? 4);
 /** Authorizations carried per attempt. Each costs ~25k gas; all name the same contract. */
-const AUTHS_PER_ATTEMPT = Number(process.env.AUTHS_PER_ATTEMPT ?? 6);
+const AUTHS_PER_ATTEMPT = (() => {
+  const requested = Number(process.env.AUTHS_PER_ATTEMPT ?? 4);
+  if (requested > AUTH_LIST_CAP) {
+    console.warn(
+      `WARN: AUTHS_PER_ATTEMPT=${requested} exceeds this chain's accepted authorization list ` +
+        `length (${AUTH_LIST_CAP}); clamping to ${AUTH_LIST_CAP}. A longer list is rejected at ` +
+        `broadcast, which at the flip would leave nothing queued.`,
+    );
+    return AUTH_LIST_CAP;
+  }
+  return requested;
+})();
 
 /**
  * Resolve a configured path against the repo root rather than the process cwd.
