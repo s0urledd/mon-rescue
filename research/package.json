@@ -22,7 +22,8 @@
     "boundary": "pnpm --filter @monrescue/shared build && tsx src/boundary-experiment.ts",
     "genkeys": "pnpm --filter @monrescue/shared build && tsx src/genkeys.ts",
     "deploy:contract": "pnpm --filter @monrescue/shared build && tsx src/deploy.ts",
-    "deploy:drainer": "node ../contracts/build.mjs && pnpm --filter @monrescue/shared build && tsx src/deploy-drainer.ts"
+    "deploy:drainer": "node ../contracts/build.mjs && pnpm --filter @monrescue/shared build && tsx src/deploy-drainer.ts",
+    "relock": "pnpm --filter @monrescue/shared build && tsx src/relock.ts"
   },
   "dependencies": {
     "@monrescue/shared": "workspace:*",
