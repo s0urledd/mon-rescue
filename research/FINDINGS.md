@@ -549,6 +549,73 @@ Two further constraints that bite the hot path specifically:
 
 ---
 
+## Q24 — The first contested win, reconstructed from receipts — and what it does NOT prove
+
+**Epoch 1046, testnet, validator 40 slot 0, 100 MON.** Equal fee (45 gwei both sides; guardian
+45000000015 wei vs attacker 45000000000 — a 15-wei tie-break, effectively equal), equal strategy
+(both pre-queued one attempt per block), gas sized correctly, all pre-arm checks passed,
+`window.json` loaded. Every number below was re-read live and verified against decoded receipts.
+
+Result: **safe +500.481907 MON, attacker sink +0.** But *how* matters more than *that*, and the
+forensic pass corrected an overclaim.
+
+### Block by block
+
+| block | epoch | request(40,slot0) | safe (MON) | event |
+|---|---|---|---|---|
+| 52254941 | 1045 (delay) | 100, full | 399.440631 | baseline |
+| **52254942** | 1045 (delay) | **still 100** | **799.407916** | **premature loose sweep** |
+| 52254943–57 | 1045 (delay) | still 100 | 799.407916 | spray continues (bar unmet) |
+| **52254958** | **1046** | **0, claimed** | **899.922538** | **flip + position claim (win)** |
+| 52254962–55008 | 1046 | 0 | 899.922538 | 46 attacker withdraws, **all revert** |
+
+- **Loose sweep** — tx `0xb5f9ae2e…`, guardian nonce 77, block 52254942. `WithdrawFailed("withdrawal
+  not ready")` + `Rescued(399.96728503, validatorCount 0)`. The position was not yet mature; only
+  the victim's loose balance moved, sweeping it to the 10 MON floor. Request stayed at 100.
+- **Win** — tx `0xe4dbb046…`, guardian nonce 90, block 52254958 (epoch flips 1045→1046 in this
+  block's tx 0). `Withdraw(100.020127)` + `ClaimRewards(0.494495)` + `Rescued(100.514622,
+  validatorCount 1)`. Request cleared to 0.
+
+### What it PROVES
+
+- **The epoch-1040 completion-bar fix works live, in a contested race — this is the headline.**
+  `doneThreshold = prematureSweep + 90% of position = 399.967 + 90 = 489.967`. The premature sweep
+  delivered 399.967, which is **below** the bar, so `isDone()` stayed false and the spray **kept
+  going** for 16 blocks to claim the position at the flip. Under the old 1-wei bar, the 399.967
+  sweep would have read as "done" and conceded the 100 MON — the exact epoch-1040 defect, now
+  demonstrably closed against a live opponent. `spray()` gates on `isDone()` (cumulative balance vs
+  bar), not on any single receipt status, so nonce 77's `success` could not stop the run.
+- **Won on mechanism, not money.** Equal fee, equal strategy, no bidding edge used. Full recovery
+  of everything above the floor (500.48 = 399.97 loose + 100.51 position+rewards).
+
+### What it does NOT prove — read this
+
+- **The destination lock is NOT why the attacker got zero.** This corrects a claim made in the
+  moment. The attacker's zero came from **losing the race**, not the lock. All 46 of their mined
+  withdraws (nonces 108–153, blocks 52254962–52255008 — every one *after* our win at 52254958)
+  reverted on the slot we had already emptied: 0 successes, 0 addressed to the sink. **No attacker
+  withdraw ever succeeded, so no funds ever landed in the victim EOA for the lock to redirect** —
+  the lock was never exercised on the attacker's path this run. It held on *our* value-moving txs
+  as a construction property (both `Rescued` events paid the safe address, no recipient argument
+  exists), but do not credit it for the attacker's zero. Speed did that.
+- **The ~400 MON loose balance was saved by speed, not by anything defensible.** Liquid MON
+  remains indefensible against a seed holder in general; here we simply reached it first. Do not
+  generalise this run into "we protect liquid balance".
+- **`window.json`'s anti-revoke path was carried but NOT exercised.** The naive attacker never
+  re-delegated, so our delegation was never challenged and the marching authorizations
+  (nonces 91..157) had nothing to undo. The re-delegating (atomic) attacker is still the open
+  question — see Q23.
+- **The 4-block margin at the flip is unexplained and may be an artifact.** We landed in 52254958,
+  the attacker's earliest mined withdraw at 52254962. Both pre-queued at equal fee, so the gap is
+  not a fee or strategy edge; it is likely spray-timing/latency against the shared local node and
+  should not be read as a structural advantage.
+
+**Net:** one honest, verified win over an equal-fee equal-strategy *naive* attacker, and the
+completion-bar fix earning its place in a real race. The auction proper (both in the flip block)
+and the atomic attacker remain unmeasured.
+
+---
+
 ## Q23 — Building the atomic adversary, and a viem nonce trap that would have faked a win
 
 The atomic re-delegating sweeper is the common attacker (Q21: ~97% of mainnet 7702 delegations).
