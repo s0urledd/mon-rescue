@@ -8,3 +8,6 @@ cache/
 !.env.example
 research/artifacts/*.json
 window.json
+
+# Scratch/probe scripts (underscore-prefixed), created and removed ad hoc for chain queries
+**/src/_*.ts
