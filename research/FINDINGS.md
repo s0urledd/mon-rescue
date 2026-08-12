@@ -549,6 +549,57 @@ Two further constraints that bite the hot path specifically:
 
 ---
 
+## Q26 — Reverted-drain delegation survival, and why the atomic attacker fights our nonce
+
+Measured before building the atomic prequeue battle test, to remove a variable.
+
+### The fact (measured, definitive)
+
+`test:drain-survival`, tx `0x5f8bac71…`, block 53110422:
+
+```
+delegated before:  0xce204ab5…  (our rescue contract)
+atomic drain on an empty slot -> REVERTED (NothingToTake)
+delegated after:   0x2d8c923d…  (the drainer)
+victim nonce:      201 -> 203  (2 consumed)
+```
+
+So on Monad, an EIP-7702 authorization **applies before the top-level call and is NOT rolled back
+when that call reverts.** Both nonces are consumed — the transaction's (201→202) and the
+authorization's (202→203) — even though `drain()` reverted. The delegation designator persists on
+the drainer. This matches the spec's ordering (authorizations processed before execution) and is
+now confirmed against live chain rather than assumed.
+
+### The consequence: the atomic attacker sends from the victim account, so we starve its nonce
+
+This is the structural point, and it composes with the emergent epoch-1053 observation (Q25) into
+something sharper.
+
+Our rescue is sent by the **guardian** (a separate account); only the victim *authorization*
+consumes the victim's nonce. The attacker's atomic drain is sent **from the victim account itself**
+(they hold the seed), so its *transaction* consumes the victim's nonce — and its self-delegation
+authorization consumes one more. Both sides therefore draw from the same counter, the victim's
+nonce, and **our spray drives it.** At epoch 1053 our authorization applications climbed it
+~0.7/block; any transaction the attacker pre-signed at a fixed victim nonce was stale before it
+could land.
+
+That puts the atomic attacker in a bind with no comfortable move:
+
+| attacker's atomic strategy | why it is disadvantaged |
+|---|---|
+| pre-queue atomic drains at fixed victim nonces | our authorizations bump the victim nonce past them; they go stale and never mine (measured: relock at 1053) |
+| react — sign a fresh atomic drain at the current victim nonce at the flip | reacting reaches only block **N+1**; the epoch advances in tx 0 of the flip block, so it cannot land in N while we pre-queue into N |
+| re-delegate once early, then spray plain drains | our rescue authorizations re-delegate the victim back to us AND consume its nonce, invalidating the plain drains and undoing the delegation |
+
+**This is a genuine structural edge, not a bid or a latency trick** — it falls out of the attacker
+having to spend the victim's nonce while we spend the guardian's, with our authorizations driving
+the shared counter. But state it as a **hypothesis still to be confirmed by an atomic battle
+test**, not a settled result: an adaptive attacker may find a line not enumerated above, and the
+edge is contingent on our spray actually running and consuming nonces at the flip. The honest
+product claim does not yet rest on it.
+
+---
+
 ## Q25 — Anti-revoke, finally exercised: proven in isolation, and an emergent nonce race
 
 Three battle tests never made the attacker re-delegate, so `window.json`'s reason to exist stayed
