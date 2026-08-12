@@ -195,6 +195,13 @@ not running.
   where the epoch has flipped by definition and a failure is real evidence of a contest. The
   window fee anchors on p90 (×10), not the max observed bid — 10x an outlier across ~60 window
   attempts costs ~98 MON to cover a window that is usually uncontested.
+- **Anti-revoke is proven (Q25).** `test:antirevoke` (isolated, ~1 min): attacker re-delegates the
+  victim to their drainer, our `sweep()` carries one `window.json` authorization, the
+  authorization re-asserts our delegation before the call, `sweep()` runs our code, funds reach
+  the safe. PASS. Property of authorization-before-call ordering, not a race. **Emergent bonus:**
+  in the live epoch 1053 spray our authorization applications climbed the victim nonce ~0.7/block
+  and *starved* the attacker's single flip-time re-delegation (it never mined) — a favorable but
+  contingent observation against a non-adaptive attacker, not a guarantee.
 - **First contested win landed at epoch 1046 (Q24).** Equal fee (45 gwei), equal strategy, naive
   attacker: safe +500.48 MON, attacker 0. The epoch-1040 completion-bar fix worked live — a
   premature 400 MON loose sweep stayed under the position-sized bar, so the spray kept going and

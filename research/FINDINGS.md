@@ -549,6 +549,70 @@ Two further constraints that bite the hot path specifically:
 
 ---
 
+## Q25 — Anti-revoke, finally exercised: proven in isolation, and an emergent nonce race
+
+Three battle tests never made the attacker re-delegate, so `window.json`'s reason to exist stayed
+untested. The epoch 1053 run was meant to fix that with `relock`, and it produced two results —
+one deliberate, one emergent — plus a correction to my own diagnosis.
+
+### The mechanism is proven (isolated test, definitive)
+
+`test:antirevoke` reproduces the anti-revoke question without a flip, in ~1 minute:
+
+```
+victim 0xa5d7…86B3: 30 MON, 20 sweepable
+[attacker] re-delegating victim to the drainer 0x2D8c923d…
+  victim now delegated to: 0x2d8c923d…  (drainer — locked out)
+[guardian] sweeping with authorization re-asserting delegation at victim nonce 200
+  sweep tx 0x7521d770… -> success in block 53108712
+  victim delegated after: 0xce204ab5…  (RE-ASSERTED to rescue contract)
+  safe received: 19.9898 MON
+PASS
+```
+
+The attacker re-delegated the victim to their drainer; our `sweep()` carried one authorization
+from `window.json` (victim nonce 200); the authorization was processed before the top-level call,
+re-delegating the victim back to our rescue contract; `sweep()` then ran our code and moved 19.99
+MON to the safe address. **The destination-locked contract executed after our authorization
+re-asserted our delegation over the attacker's re-delegation.** That is the anti-revoke property,
+demonstrated directly for the first time. It does not depend on winning any race — it is a
+property of the authorization-before-call ordering in EIP-7702.
+
+### The emergent result: our spray starved the attacker's re-delegation of its nonce
+
+In the live epoch 1053 run, `relock` broadcast its re-delegation (tx `0xb8e0d667…`) at the flip —
+and it **never mined**. The victim nonce over the window tells the story:
+
+```
+victim nonce: 159 @52604939 → 163 @52604949 → 172 @52604962 → 184 @52604980 → 198 @52605000
+```
+
+That climb — ~0.7 nonce/block, 159→198 — was **entirely our guardian's authorization
+applications**: every rescue attempt that executed applied a victim authorization from the window,
+and applying an authorization increments the authority's nonce. `relock` signed its re-delegation
+at nonce 159; by the time it reached a leader our spray had already consumed 159 and beyond, so the
+attacker's transaction was stale and was dropped. Its `waitForTransactionReceipt` timed out because
+it never landed.
+
+So under a live spray, a single flip-time re-delegation from the attacker can be **starved of its
+nonce by our own authorization traffic.** State it precisely and do not oversell it: this is one
+observation against a non-adaptive single-shot attacker. An attacker who re-delegates *before* our
+spray starts (while the nonce is stable), or sprays re-delegations across many nonces, is not
+starved — and the isolated test above is exactly why that attacker still loses: whenever their
+re-delegation *does* land, our next authorization re-asserts over it. The two results compose: land
+or not, the position stays ours.
+
+### Correction: my `relock` diagnosis was wrong twice
+
+I first blamed an unguarded poll loop (a real weakness, now fixed, but not the cause), then took
+the "0 victim txs on-chain" reading as "relock never fired". The log and the missing receipt show
+what actually happened: relock *did* broadcast, the tx lost the nonce race and never mined, and
+`waitForTransactionReceipt` timed out. The lesson for the harness: to test anti-revoke under a live
+spray, `relock` must re-delegate *before* `sprayStart`, while the victim nonce is still stable —
+firing at the flip puts it into a nonce race it structurally loses. Fixed accordingly.
+
+---
+
 ## Q24 — The first contested win, reconstructed from receipts — and what it does NOT prove
 
 **Epoch 1046, testnet, validator 40 slot 0, 100 MON.** Equal fee (45 gwei both sides; guardian
