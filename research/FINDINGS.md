@@ -549,6 +549,57 @@ Two further constraints that bite the hot path specifically:
 
 ---
 
+## Q27 — Atomic attacker, live: its drain was starved of its nonce and never mined
+
+**Epoch 1071, testnet.** `MODE=atomic ADVERSARY_STRATEGY=react`, equal fee (45 gwei), against our
+pre-queued arm. The ~97%-of-mainnet re-delegating sweeper, run for the first time. Verified on
+chain.
+
+```
+atomic drain tx 0x1195bc54… — NEVER MINED (adversary's waitForTransactionReceipt timed out)
+safe   +116.148644 MON  (15.92 loose + 100 position + rewards — full recovery)
+sink   +0
+victim  10 MON, delegated to our rescue contract, slot claimed
+```
+
+### What happened
+
+The attacker fired its atomic drain at block 53504989, from the **victim account**, at the victim's
+then-current nonce. But our spray was already running (from 53504951) and its authorization
+applications were climbing the victim nonce — the arm log shows it move `210 → 215 → 220 → … → 244`
+across the window, ~0.7/block, each `THREAT nonce_advanced` line being one of our own
+authorizations applying. By the time the attacker's drain reached a leader, our authorizations had
+consumed its nonce, and it was dropped unmined — the same starvation that killed relock at epoch
+1053 (Q25), now reproduced against a full atomic drain.
+
+So the Q26 hypothesis held live: **the atomic drain is sent from the victim account, its nonce is
+the counter our spray drives, and it was starved.** Two independent confirmations now (relock,
+atomic-react).
+
+### The honest limit — this is NOT the conclusive atomic test
+
+Read this before treating the atomic threat as closed. It is not.
+
+- **react reaches only N+1 anyway.** The adversary's own caveat stands: a win here is partly the
+  pre-queue edge, not purely the starvation.
+- **The attacker was non-adaptive.** It sent ONE drain from the victim account at a single nonce
+  and blocked on the receipt. Everything about the loss is contingent on that.
+- **A sophisticated atomic attacker mirrors our own design and is NOT obviously starved.** The
+  drain does not *have* to be sent from the victim account: the attacker can **sponsor** it from a
+  second account (the drain tx consumes the sponsor's nonce, not the victim's) while carrying a
+  victim authorization — exactly how our guardian sponsors our rescue. The authorization still
+  needs the victim's current nonce, but the attacker can **march their authorizations across a
+  nonce range** just as we do, so our bumping no longer strands them. That attacker — sponsored
+  drains + a marching victim-authorization window — is the true worst case, and it is **unmeasured.**
+  Against it the flip-block auction likely comes down to ordering and fee, where we hold no
+  structural edge, only the pre-queue-into-N advantage if they react rather than pre-queue.
+
+**Net:** a real win against the common non-adaptive atomic attacker, and a second live confirmation
+of the nonce-starvation edge — but the mirror-design atomic attacker (sponsored + marching auths)
+is the last real unknown, and the product claim must not yet assert we beat it.
+
+---
+
 ## Q26 — Reverted-drain delegation survival, and why the atomic attacker fights our nonce
 
 Measured before building the atomic prequeue battle test, to remove a variable.

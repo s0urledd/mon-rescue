@@ -218,10 +218,14 @@ not running.
   now retries while any slot still holds a withdrawal request and the guardian can afford a
   shot, because `rescue()` sweeps regardless of whether the withdrawals succeed — so a revert
   means the money has not arrived *yet* at least as often as it means it is gone.
-- **Atomic adversary built, conclusive run still pending.** `AdversaryDrainer` + `MODE=atomic`
-  mirror the common (~97%) re-delegating sweeper. `react` mode only reaches N+1, so a win there
-  proves nothing — the meaningful test is `ADVERSARY_STRATEGY=prequeue`, gated until reverted-drain
-  delegation survival is measured. See Q23.
+- **Atomic attacker beaten once, but the mirror-design one is untested (Q27).** Epoch 1071,
+  `MODE=atomic react`, equal fee: safe +116.15 MON, attacker 0 — its atomic drain was **starved of
+  its nonce and never mined**, our spray's authorizations climbing the victim nonce ~0.7/block
+  (second live confirmation, after relock). BUT honest limit: the drain was sent from the victim
+  account and the attacker was non-adaptive. A sophisticated attacker **sponsors** the drain from a
+  second account (its nonce, not the victim's) and **marches its own victim-authorizations** across
+  a range, exactly as we do — not starved. That attacker is the last real unknown; do not claim we
+  beat it.
 - **viem `executor: 'self'` does NOT tie the auth nonce to your tx nonce** — it fetches its own at
   `blockTag: 'pending'`. Always pass the authorization nonce explicitly as `txNonce + 1`. A silent
   skip here writes `status: success` while nothing ran (Q23).
