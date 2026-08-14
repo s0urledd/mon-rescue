@@ -86,11 +86,28 @@ async function main() {
   console.log(`flip window ${sprayStart}..${latestStart}`);
   if (sponsorBal === 0n) throw new Error('sponsor has no gas — fund ATTACKER_SPONSOR_KEY');
 
-  // Equal-fee bid, mirroring arm's window tip.
-  const tipGwei = requireEnv('MIRROR_TIP_GWEI');
-  const maxPriorityFeePerGas = parseGwei(tipGwei);
+  // Equal-fee bid. To make it truly equal without hand-copying a number from arm, compute the
+  // tip the SAME way arm's window does — p90 of recently-observed priority fees times 15 — rather
+  // than requiring MIRROR_TIP_GWEI. Set MIRROR_TIP_GWEI to override.
+  let maxPriorityFeePerGas: bigint;
+  if (process.env.MIRROR_TIP_GWEI) {
+    maxPriorityFeePerGas = parseGwei(process.env.MIRROR_TIP_GWEI);
+    console.log(`bid: ${process.env.MIRROR_TIP_GWEI} gwei tip (explicit override)`);
+  } else {
+    const head = await client.getBlockNumber();
+    const tips: bigint[] = [];
+    for (let i = 0; i < 5; i++) {
+      try {
+        const blk = await client.getBlock({ blockNumber: head - BigInt(i), includeTransactions: true });
+        for (const tx of blk.transactions) if (typeof tx !== 'string' && tx.maxPriorityFeePerGas != null) tips.push(tx.maxPriorityFeePerGas);
+      } catch { /* skip */ }
+    }
+    tips.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    const p90 = tips.length ? tips[Math.min(tips.length - 1, Math.floor(0.9 * tips.length))]! : parseGwei('2');
+    maxPriorityFeePerGas = (p90 > 0n ? p90 : parseGwei('2')) * 15n; // arm's WINDOW_FEE_OVERTOP
+    console.log(`bid: ${maxPriorityFeePerGas / 1_000_000_000n} gwei tip (p90 x15 of ${tips.length} txs — matches arm's window)`);
+  }
   const maxFeePerGas = parseGwei('300') + maxPriorityFeePerGas;
-  console.log(`bid: ${tipGwei} gwei tip (equal-fee)`);
 
   // --- marching victim->drainer authorization window (their window.json) ----
   // Signed by the victim key at the victim's current nonces, NO +1 and NO executor:'self',
