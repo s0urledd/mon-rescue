@@ -43,11 +43,53 @@ export interface UnstakeEvent {
   txHash: `0x${string}`;
 }
 
+/** Decode raw Undelegate logs into UnstakeEvents. Shared by the fast path and the paged fallback. */
+function decodeUnstakes(
+  logs: ReadonlyArray<{
+    args: {
+      validatorId?: bigint; delegator?: `0x${string}`; withdrawId?: number;
+      amount?: bigint; activationEpoch?: bigint;
+    };
+    blockNumber: bigint | null;
+    transactionHash: `0x${string}` | null;
+  }>,
+  delegator: `0x${string}`,
+): UnstakeEvent[] {
+  const out: UnstakeEvent[] = [];
+  for (const log of logs) {
+    const a = log.args;
+    if (a.validatorId === undefined || a.activationEpoch === undefined) continue;
+    out.push({
+      validatorId: a.validatorId,
+      delegator: getAddress(a.delegator ?? delegator),
+      withdrawId: Number(a.withdrawId ?? 0),
+      amount: a.amount ?? 0n,
+      activationEpoch: a.activationEpoch,
+      maturesAtEpoch: maturityEpoch(a.activationEpoch),
+      blockNumber: log.blockNumber ?? 0n,
+      txHash: (log.transactionHash ?? '0x') as `0x${string}`,
+    });
+  }
+  return out;
+}
+
 /**
  * Scan a block range for unstakes by one delegator.
  *
  * Filtering is done server-side on the indexed `delegator` topic, so the node does the work and
  * we never pull the precompile's whole log volume across the wire.
+ *
+ * Two paths:
+ *  - FAST: one getLogs over the whole range. A local node — and most RPCs — serve this in a single
+ *    round-trip. The `MAX_LOG_RANGE` cap below is a *public-endpoint* limit; forcing every scan
+ *    through it turns one query into thousands and, over a multi-day lookback on a local WS node,
+ *    hung an intake for 5+ minutes (`discovering positions...` with nothing after it). Time-to-armed
+ *    is the whole metric in an emergency, so we try the wide call first.
+ *  - PAGED fallback: only if the endpoint refuses the range (throws). Bounded-concurrency 100-block
+ *    windows, each window's failure swallowed so one bad range never abandons the scan.
+ *
+ * Set `FORCE_LOG_PAGING=1` to skip the fast path — for an endpoint that silently truncates an
+ * oversized range instead of erroring (paging is then the only way to be sure nothing is missed).
  */
 export async function scanUnstakes(
   client: PublicClient,
@@ -55,9 +97,23 @@ export async function scanUnstakes(
   fromBlock: bigint,
   toBlock: bigint,
 ): Promise<UnstakeEvent[]> {
-  // Build every 100-block window first, then run them with bounded concurrency. Over a
-  // multi-day range that is thousands of calls, and sequentially it takes minutes — unusable
-  // in an emergency intake, where time-to-armed is the whole metric.
+  const sort = (evs: UnstakeEvent[]) => evs.sort((x, y) => (x.blockNumber < y.blockNumber ? -1 : 1));
+
+  if (process.env.FORCE_LOG_PAGING !== '1') {
+    try {
+      const logs = await client.getLogs({
+        address: STAKING_PRECOMPILE,
+        event: UNDELEGATE_EVENT,
+        args: { delegator },
+        fromBlock,
+        toBlock,
+      });
+      return sort(decodeUnstakes(logs, delegator));
+    } catch {
+      // Endpoint capped the range — fall through to bounded-concurrency paging.
+    }
+  }
+
   const windows: Array<[bigint, bigint]> = [];
   for (let start = fromBlock; start <= toBlock; start += MAX_LOG_RANGE) {
     const end = start + MAX_LOG_RANGE - 1n > toBlock ? toBlock : start + MAX_LOG_RANGE - 1n;
@@ -84,28 +140,10 @@ export async function scanUnstakes(
       ),
     );
 
-    for (const logs of results) {
-      for (const log of logs) {
-        const a = log.args as {
-          validatorId?: bigint; delegator?: `0x${string}`; withdrawId?: number;
-          amount?: bigint; activationEpoch?: bigint;
-        };
-        if (a.validatorId === undefined || a.activationEpoch === undefined) continue;
-        out.push({
-          validatorId: a.validatorId,
-          delegator: getAddress(a.delegator ?? delegator),
-          withdrawId: Number(a.withdrawId ?? 0),
-          amount: a.amount ?? 0n,
-          activationEpoch: a.activationEpoch,
-          maturesAtEpoch: maturityEpoch(a.activationEpoch),
-          blockNumber: log.blockNumber ?? 0n,
-          txHash: (log.transactionHash ?? '0x') as `0x${string}`,
-        });
-      }
-    }
+    for (const logs of results) out.push(...decodeUnstakes(logs, delegator));
   }
 
-  return out.sort((x, y) => (x.blockNumber < y.blockNumber ? -1 : 1));
+  return sort(out);
 }
 
 /**
