@@ -218,14 +218,22 @@ not running.
   now retries while any slot still holds a withdrawal request and the guardian can afford a
   shot, because `rescue()` sweeps regardless of whether the withdrawals succeed — so a revert
   means the money has not arrived *yet* at least as often as it means it is gone.
-- **Atomic attacker beaten once, but the mirror-design one is untested (Q27).** Epoch 1071,
-  `MODE=atomic react`, equal fee: safe +116.15 MON, attacker 0 — its atomic drain was **starved of
-  its nonce and never mined**, our spray's authorizations climbing the victim nonce ~0.7/block
-  (second live confirmation, after relock). BUT honest limit: the drain was sent from the victim
-  account and the attacker was non-adaptive. A sophisticated attacker **sponsors** the drain from a
-  second account (its nonce, not the victim's) and **marches its own victim-authorizations** across
-  a range, exactly as we do — not starved. That attacker is the last real unknown; do not claim we
-  beat it.
+- **The mirror-design atomic attacker is measured — and it WINS at parity (Q28). The honest ceiling.**
+  Prior atomic wins beat an attacker draining *from the victim account*, so we starved its nonce
+  (Q27, epoch 1071: safe +116.15, attacker 0). The mirror twin removes that mistake — it **sponsors**
+  the drain (sponsor's nonce, immune to our bumping) and **marches its own victim-authorizations**
+  across a range, exactly as we do. Epoch 1076, equal fee (45 gwei), equal coverage (100%), equal
+  infra, verified on-chain: **total loss** — attacker sink **+115.007 MON** (100 position + ~15
+  loose), safe **+0**, victim swept to the 10 MON floor. At parity the flip block is winner-take-all
+  on `withdraw()` ordering — a coin flip — and **we hold no structural edge.** The destination lock
+  bought nothing (the attacker owned the delegation at the decisive block → funds flowed through
+  *their* contract to their sink); nonce-starvation does not apply to a sponsored drain; anti-revoke
+  re-delegated us back but *after* the slot was emptied. **This kills "we always win" permanently.**
+  Untouched by this test: **outbid** (fee ladder to the 100–200 MON ceiling) and **infra/latency**
+  (both were localhost) — the actual product — plus the field being ~97% naive sweepers we beat live
+  (Q24, Q27). N=1: proves the tails side exists, not its probability. **Next test that matters:** our
+  fee ladder *engaged* vs the attacker's flat 45 — needs the position rebuilt (victim is at the floor
+  now).
 - **viem `executor: 'self'` does NOT tie the auth nonce to your tx nonce** — it fetches its own at
   `blockTag: 'pending'`. Always pass the authorization nonce explicitly as `txNonce + 1`. A silent
   skip here writes `status: success` while nothing ran (Q23).

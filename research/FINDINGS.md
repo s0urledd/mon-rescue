@@ -549,6 +549,89 @@ Two further constraints that bite the hot path specifically:
 
 ---
 
+## Q28 — The mirror-design atomic attacker wins at parity: the honest ceiling, measured
+
+The last and hardest battle test — the attacker Q27 explicitly left open. Every prior atomic win
+beat an attacker that made a mistake we could exploit: it sent its drain **from the victim account**
+(Q27, epoch 1071), so its transaction competed with our authorizations for the victim's nonce and we
+starved it. This test removes that mistake. `mirror-atomic.ts` is our exact twin:
+
+- a **sponsor** account sends every drain, so the drain consumes the *sponsor's* nonce — immune to
+  our victim-nonce bumping;
+- a **marching** window of victim→drainer authorizations, signed across the victim's nonce range, so
+  whatever the victim's nonce is at the flip block, a valid re-delegation is carried;
+- a **pre-queued** spray, one drain per block across the flip window;
+- **equal fee** (both sides p90×15 = 45 gwei), **equal coverage** (both 100% of the 60-block window),
+  **equal infra** (both beside the same local node).
+
+### Result — a total loss, verified on-chain (epoch 1076, flip block 53,755,049)
+
+| measurement | value |
+|---|---|
+| sink (attacker) | 98.243945 → 213.251319 = **+115.007 MON** |
+| safe (us) | 1019.657594 → 1019.657594 = **+0** |
+| victim | 24.97 → **10.000000** (swept to exactly the reserve floor) |
+| victim delegation (final) | `0xef0100…ce204…` = our rescue contract |
+
+The attacker took the whole prize — the 100 MON position plus the ~15 MON of loose balance above the
+floor. Our 64 attempts all reverted (`succeeded=false`), the backstop reverted, the safe received
+nothing.
+
+### Mechanism — why we lost, precisely
+
+1. At equal fee, ordering in the flip block *is* the coin flip. The attacker's sponsored drain,
+   carrying a marching victim→drainer authorization, landed **first**: its auth re-delegated the
+   victim to the drainer, `withdraw()` matured the 100 MON to the victim, and the drainer swept
+   115 MON to the sink — one transaction.
+2. **`withdraw()` is winner-take-all per slot.** The first successful withdraw consumes the
+   withdrawal request; every one of our attempts after it hit an empty slot and reverted.
+3. **The destination lock bought nothing here.** It protects funds that flow through *our* contract.
+   At the decisive block the attacker controlled the delegation, so the funds flowed through *their*
+   contract (their lock → their sink). Our lock is irrelevant when the attacker owns the delegation
+   at the instant withdraw+sweep executes.
+4. **Nonce-starvation (the Q25/Q26/Q27 emergent edge) did not apply.** That edge came from an
+   attacker draining *from the victim account*; a sponsored drain never touches the victim nonce, and
+   a marching authorization window covers whatever nonce the victim is at. The design defeats
+   starvation on purpose — confirming CLAUDE.md's own caveat that the epoch-1053/1071 observation was
+   "contingent against a non-adaptive attacker, not a guarantee."
+5. **Anti-revoke (Q25) is necessary, not sufficient.** Our authorization did re-assert our delegation
+   — the victim ends the run pointing at our rescue contract — but *after* the attacker's
+   withdraw+sweep had already emptied the slot. Re-delegating to a live position wins; re-delegating
+   to an emptied one is a no-op.
+
+### What this establishes — and what it does NOT
+
+**Establishes:** at equal fee, equal coverage, and equal infrastructure, against a mirror-design
+(sponsored + marching-authorization) atomic attacker, the rescue is a coin flip decided by flip-block
+ordering, and the loss is total. **We hold no structural edge in a symmetric fight.** This kills any
+"we always win" claim, permanently. It was the predicted worst case; it is now measured rather than
+argued.
+
+**Does NOT establish** that we lose a majority at parity. N=1 — a coin that came up tails. It proves
+the tails side exists (enough to bound the claim), not its probability.
+
+**Says nothing about the two levers we deliberately disabled**, which are the actual product:
+- **Outbid.** We pinned both sides at 45 gwei to isolate the race. Production escalates the fee ladder
+  to a 100–200 MON operator ceiling; on positions where our willingness-to-pay to *save* exceeds the
+  attacker's to *steal*, we take the auction. This test turned that lever off.
+- **Infra/latency.** Both sides ran on the same localhost, zeroing our real-world edge (we run beside
+  a local node with multi-endpoint broadcast; the field attacker does not).
+
+And the field is not this attacker: ~97% of mainnet 7702 delegations are copy-paste sweepers (Q21) —
+react-only, non-adaptive, unsponsored — which we have beaten live (Q24, Q27). The mirror twin is a
+bespoke adversary that costs real engineering to field.
+
+### The next test that would actually matter
+
+Re-run this with **our fee ladder engaged** (escalating) against the attacker's flat 45 gwei — the
+realistic deployment. It needs the position rebuilt: the victim is drained to the floor, so re-stake
+→ `startUnbonding` → wait a maturity.
+
+Artifact: `research/artifacts/battle-mirror-atomic.json`. Attacker sink swept in block 53,755,049;
+our spray nonces 217–230 all reverted.
+
+---
+
 ## Q27 — Atomic attacker, live: its drain was starved of its nonce and never mined
 
 **Epoch 1071, testnet.** `MODE=atomic ADVERSARY_STRATEGY=react`, equal fee (45 gwei), against our
