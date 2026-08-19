@@ -549,6 +549,89 @@ Two further constraints that bite the hot path specifically:
 
 ---
 
+## Q29 — Outbidding 3× does NOT recover the loss: the real race is the anti-revoke nonce race, not the fee
+
+Q28 said the mirror-design attacker wins at parity and left one lever untested: **outbid**. This
+test engaged it. Same rebuilt position (validator 40, slot 0, 100 MON, epoch 1097), same 100%
+coverage on both sides, same infra, same full anti-revoke window (re-signed to cover 322..388) —
+the ONLY asymmetry was fee: **arm bid 135 gwei, the attacker 45 (exactly 3×)**, both computed
+`p90 × OVERTOP` off the same `p90 = 3` sample so the ratio was clean by construction.
+
+### Result — arm lost again, verified on-chain (epoch 1097, flip block 54,805,035)
+
+| measurement | value |
+|---|---|
+| safe (us) | 1019.657594 → 1024.610953 = **+4.95 MON** (the loose balance only) |
+| sink (attacker) | 108.249136 → 208.253882 = **+100.00 MON** (the position) |
+| victim | **10.000000** (floor) |
+| victim delegation (final) | our rescue contract (re-asserted too late) |
+
+arm swept only the ~5 MON of loose balance above the floor — a premature sweep, not the position.
+All 64 spray attempts reported `succeeded=false`. The attacker took the 100 MON position.
+
+### Mechanism — why the 3× fee was moot
+
+The loss was NOT decided by flip-block fee ordering. It was decided by the **anti-revoke nonce
+race**, and arm lost it:
+
+```
+nonce_advanced: 367 -> 374 -> 381 -> 387          (~20 victim nonces inside the flip window)
+delegation_hijacked: Delegation now points at 0x2d8c…  (the attacker's drainer)
+spray: 64 attempt(s), succeeded=false
+```
+
+1. The attacker's marching sponsored re-delegations advanced the **victim's nonce ~7 per block**
+   (367→387 across the flip window).
+2. arm's re-assertion window was wide enough — re-signed to cover victim nonces **322..388**, which
+   *includes* the live range (367–387). But arm selects the slice per attempt as
+   `startupNonce(322) + i`, anchored to the nonce read **once** at startup. So attempt 0 carries
+   322–325, attempt 1 carries 323–326, and so on. The attempts that actually reached the wire — the
+   early, low-`i` ones the sequential guardian-nonce spray sends first — carried nonces the attacker
+   had already consumed: **stale, and silently skipped** (an authorization's nonce must match
+   exactly). The matching high-nonce authorizations existed in the window but sat in attempts
+   (i ≳ 45) the spray never reached before the flip.
+3. With no valid re-assertion applied, arm's `rescue()` executed against the live delegation — the
+   attacker's **drainer** — running the attacker's code, not ours. All 64 reverted.
+4. A 3× fee that orders your transaction first in the block is worthless if that transaction runs
+   the attacker's code. Fee wins *ordering* (Q7's PGA is real); it does not win *this* race, which
+   is decided by the delegation state at the instant of execution.
+
+### What this establishes
+
+**Outbidding does not recover the parity loss against a sponsored, nonce-racing attacker.** The fee
+lever CLAUDE.md leans on for "where speed ties, the one that outbids" does not decide this fight.
+The attacker holds a structural lever we do not currently counter: advancing the victim's nonce
+faster than our pre-signed anti-revoke can present a matching re-assertion. Sharper than Q28's
+coin-flip framing.
+
+### The concrete lead — and why it is not a quick fix
+
+The window was not too narrow; the **per-attempt selection was mis-anchored** (startup nonce, not
+live nonce). If arm selected authorizations by the live victim nonce at broadcast time, its
+flip-block attempt could carry a valid re-assertion — and *then* the 3× fee might actually win. Two
+constraints block the naive fix:
+
+- **Guardian nonces are sequential.** Attempt `i` is a guardian transaction at nonce `baseNonce + i`;
+  arm cannot jump to the attempt whose authorization matches the live nonce without first spending
+  the earlier guardian nonces.
+- **The authorization list is capped at 4** (Q22), so one attempt covers only 4 consecutive victim
+  nonces — and the attacker can always race one past them.
+
+The plausible fix is to sign **one fresh attempt at the flip**, carrying an authorization at the
+live victim nonce and the next guardian nonce — a hot-path signature the pre-sign design otherwise
+avoids. Whether that beats a *continuously* racing attacker is unproven, and is now the single most
+important open question in the project.
+
+### Honest limits
+
+N=1. The field is not this attacker: ~97% of mainnet 7702 delegations are copy-paste sweepers (Q21)
+that do not sponsor, march, or nonce-race, and we have beaten them live (Q24, Q27). But the worst
+case is now measured twice — Q28 (parity) and Q29 (3× outbid) — and outbidding did not change the
+outcome. Artifact: `research/artifacts/battle-mirror-atomic.json`; attacker sink swept in block
+54,805,035.
+
+---
+
 ## Q28 — The mirror-design atomic attacker wins at parity: the honest ceiling, measured
 
 The last and hardest battle test — the attacker Q27 explicitly left open. Every prior atomic win

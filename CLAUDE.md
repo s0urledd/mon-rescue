@@ -231,9 +231,23 @@ not running.
   re-delegated us back but *after* the slot was emptied. **This kills "we always win" permanently.**
   Untouched by this test: **outbid** (fee ladder to the 100–200 MON ceiling) and **infra/latency**
   (both were localhost) — the actual product — plus the field being ~97% naive sweepers we beat live
-  (Q24, Q27). N=1: proves the tails side exists, not its probability. **Next test that matters:** our
-  fee ladder *engaged* vs the attacker's flat 45 — needs the position rebuilt (victim is at the floor
-  now).
+  (Q24, Q27). N=1: proves the tails side exists, not its probability. **The outbid test has since run
+  (Q29) — it did not help.**
+- **Outbidding 3× does NOT recover it — the real fight is the anti-revoke nonce race, not the fee (Q29).**
+  Rebuilt position, epoch 1097, everything symmetric except fee: arm **135 gwei** vs attacker **45**
+  (exactly 3×), both off the same p90=3. Verified on-chain: **arm lost again** — safe **+4.95** (loose
+  only), sink **+100** (position), victim at the 10 MON floor. Why the 3× was moot: the attacker's
+  marching sponsored re-delegations advanced the **victim nonce ~7/block** (367→387); arm's anti-revoke
+  selects its per-attempt slice as `startupNonce + i` (anchored at startup, +1 per attempt), so the
+  early attempts that actually broadcast carried nonces already consumed — **stale, silently skipped** —
+  and arm's `rescue()` ran the attacker's **drainer** code. **A fee that orders you first is worthless
+  if your tx runs the attacker's code.** Fee wins ordering (Q7 PGA is real); it does not win *this* race,
+  which the delegation-at-execution decides — and the attacker takes that by nonce-racing. **The lead
+  (unproven):** the window was wide enough (322..388 covered the live 367–387); the *selection* was
+  mis-anchored. Selecting auths by the **live** nonce could let the 3× fee win — but sequential guardian
+  nonces + the 4-auth cap (Q22) block the naive fix; it needs **one fresh flip-time signature**
+  (live-nonce auth, next guardian nonce), a hot-path trade against pre-signing. Whether that beats a
+  *continuously* racing attacker is **the single most important open question now.**
 - **viem `executor: 'self'` does NOT tie the auth nonce to your tx nonce** — it fetches its own at
   `blockTag: 'pending'`. Always pass the authorization nonce explicitly as `txNonce + 1`. A silent
   skip here writes `status: success` while nothing ran (Q23).
