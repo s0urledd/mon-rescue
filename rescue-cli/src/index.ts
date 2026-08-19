@@ -24,7 +24,7 @@ import {
   preflight, gasBudgetFromEnv, attemptsAffordable,
   watchGuardianBalance, GUARDIAN_INFLIGHT_FLOOR,
 } from './preflight.js';
-import { selectAuthorizations, validateWindow, assessWindow, type AuthorizationWindow } from './authorization.js';
+import { selectAuthorizations, validateWindow, assessWindow, windowCeiling, type AuthorizationWindow } from './authorization.js';
 import { observeFees, planFee, feeSchedule, maxSpendPerAttemptFromEnv } from './fees.js';
 import { simulateRescuePaths, reportChecks } from './simulate.js';
 import { isAbsolute, resolve } from 'node:path';
@@ -481,38 +481,33 @@ async function main() {
 
   const baseNonce = await client.getTransactionCount({ address: guardian.address });
   const victimNonce = await client.getTransactionCount({ address: victim });
-  // Carry a slice of the window in every attempt. The authorization list is processed BEFORE
-  // the top-level call, so each attempt re-asserts our delegation and then rescues, atomically.
-  // Several are included because the attacker can bump the victim's nonce between now and the
-  // flip; all of them name the same destination-locked contract, so whether one applies or all
-  // do, the outcome is identical.
+  // Carry a slice of the window in every attempt. The authorization list is processed BEFORE the
+  // top-level call, so each attempt re-asserts our delegation and then rescues, atomically.
   //
-  // The ranges MARCH FORWARD across the spray, and that is the point.
-  //
-  // A fixed list is dead the moment the attacker's nonce passes it. At epoch 1040 theirs went
-  // 23 -> 84 inside the flip window — 61 nonces — not to grief us but simply because they were
-  // pre-queuing too. An attempt signed to re-assert at nonces 23..28 is useless by the time the
-  // account sits at 84, so every remaining attempt in our spray would carry authorizations that
-  // can never apply, and a revoke seconds before the flip would be permanent.
-  //
-  // So attempt `i` covers nonces starting at `victimNonce + i`. The union across the spray
-  // spans the whole plausible range, whichever attempt is the one in the flip block. Wrong-nonce
-  // tuples are skipped rather than fatal ("continue to the next tuple in the list"), so the only
-  // cost of the ones that miss is gas we have already budgeted for.
-  const authsFor = (i: number): SignedAuthorization[] | undefined =>
-    window ? selectAuthorizations(window, victimNonce + i, AUTHS_PER_ATTEMPT) : undefined;
-  const authorizationList = authsFor(0);
-  if (authorizationList && window) {
-    const last = authsFor(attemptCount - 1) ?? [];
+  // The slice MUST be chosen against the LIVE victim nonce, at broadcast — not baked in up front.
+  // Q29 proved why: a sponsored attacker marches the victim nonce ~7 per block (367->387 across
+  // one flip window). An attempt pre-signed to re-assert at `startupNonce + i` therefore carries
+  // nonces the attacker has already consumed by the time the early, low-`i` attempts reach the
+  // wire — stale, silently skipped — so rescue() runs against the attacker's live delegation
+  // (their drainer) and reverts, no matter how high we bid. selectAuthorizations already takes
+  // the current nonce and returns a forward spread that tolerates a few steps of drift; the fix is
+  // simply to read that nonce at the last moment. So each windowed attempt signs just-in-time (a
+  // millisecond spread across the window, nowhere near the flip instant) rather than up front.
+  const selectLiveAuths = async (): Promise<SignedAuthorization[] | undefined> => {
+    if (!window) return undefined;
+    let n = victimNonce; // startup nonce as a floor if the live read hiccups — never throw here
+    try { n = await client.getTransactionCount({ address: victim }); } catch { /* keep the floor */ }
+    return selectAuthorizations(window, n, AUTHS_PER_ATTEMPT);
+  };
+  if (window) {
+    const health = assessWindow(window, victimNonce);
     console.log(
-      `carrying ${AUTHS_PER_ATTEMPT} authorization(s) per attempt, ranges marching ` +
-        `${victimNonce}..${(last[last.length - 1]?.nonce as number) ?? victimNonce} across the spray`,
+      `carrying ${AUTHS_PER_ATTEMPT} authorization(s) per attempt, selected LIVE against the ` +
+        `victim nonce at broadcast — window covers ${window.startNonce}..${windowCeiling(window)}, ` +
+        `${health.headroom} nonce(s) of headroom now`,
     );
-    if (last.length === 0) {
-      console.warn(
-        `  WARN: the window runs out before the last attempt. The attacker can outlast it by ` +
-          `spending nonces — re-sign a wider window (AUTH_WINDOW_SIZE).`,
-      );
+    if (health.needsRefresh || health.exhausted) {
+      console.warn(`  WARN: ${health.message}`);
     }
   }
 
@@ -564,18 +559,42 @@ async function main() {
   const attempts: SprayAttempt[] = [];
   for (let i = 0; i < attemptCount; i++) {
     const step = schedule[i]!;
-    attempts.push({
-      nonce: baseNonce + i,
-      raw: await wallet.signTransaction({
-        to: victim, data, nonce: baseNonce + i, gas,
-        maxFeePerGas: step.maxFeePerGas,
-        maxPriorityFeePerGas: step.maxPriorityFeePerGas,
-        chain,
-        ...(() => { const a = authsFor(i); return a && a.length ? { authorizationList: a } : {}; })(),
-      } as never),
-    });
+    const guardianNonce = baseNonce + i;
+    const request = {
+      to: victim, data, nonce: guardianNonce, gas,
+      maxFeePerGas: step.maxFeePerGas,
+      maxPriorityFeePerGas: step.maxPriorityFeePerGas,
+      chain,
+    };
+    if (window) {
+      // JIT: pick the authorization slice against the LIVE victim nonce at broadcast (Q29 fix).
+      // The guardian nonce stays fixed and sequential; only the auth slice is chosen late.
+      attempts.push({
+        nonce: guardianNonce,
+        sign: async (): Promise<`0x${string}`> => {
+          const auths = await selectLiveAuths();
+          // DEBUG_AUTH surfaces the live selection so a re-test can confirm the auth nonce climbs
+          // WITH the attacker's nonce racing, rather than lagging behind it as in Q29.
+          if (process.env.DEBUG_AUTH && auths?.length) {
+            console.log(`    re-assert @ victim nonce ${auths[0]!.nonce}..${auths[auths.length - 1]!.nonce}`);
+          }
+          return wallet.signTransaction({
+            ...request,
+            ...(auths && auths.length ? { authorizationList: auths } : {}),
+          } as never);
+        },
+      });
+    } else {
+      // No window to re-assert — nothing races, so pre-sign statically as before.
+      attempts.push({ nonce: guardianNonce, raw: await wallet.signTransaction(request as never) });
+    }
   }
-  console.log(`pre-signed in ${Date.now() - t0}ms — the flip window will only broadcast`);
+  console.log(
+    window
+      ? `prepared ${attemptCount} attempt(s) in ${Date.now() - t0}ms — each signs JIT at broadcast ` +
+          `with the live-nonce authorization`
+      : `pre-signed in ${Date.now() - t0}ms — the flip window will only broadcast`,
+  );
 
   // --- watchers -----------------------------------------------------------
   const stopGuard = watchAccount({
@@ -583,7 +602,7 @@ async function main() {
     onThreat: (threats) => {
       for (const t of threats) {
         console.warn(`THREAT ${t.kind}: ${t.detail}`);
-        if (!t.rescueStillArmed && !authorizationList) {
+        if (!t.rescueStillArmed && !window) {
           console.warn(`  no authorization window loaded — cannot re-assert. Re-arm manually.`);
         }
       }
@@ -743,7 +762,8 @@ async function main() {
         console.log(`firing a single attempt (SPRAY_MODE=off — reacting, not pre-queueing)`);
         const single = attempts[0]!;
         const t0 = Date.now();
-        const r = await broadcastEverywhere(CHAIN_ID, single.raw, urls);
+        const singleRaw = single.raw ?? (await single.sign!());
+        const r = await broadcastEverywhere(CHAIN_ID, singleRaw, urls);
         console.log(`  nonce=${single.nonce} ${r.hash ?? 'REJECTED'} (${Date.now() - t0}ms)`);
         if (r.hash) {
           const receipt = await client.waitForTransactionReceipt({ hash: r.hash });
@@ -778,9 +798,12 @@ async function main() {
     // money is still there to be claimed.
     if (isClaimable(epoch, targetEpoch - 1n) || epoch.epoch >= targetEpoch) {
       const nonce = await client.getTransactionCount({ address: guardian.address });
+      // Fresh backstop: select the authorization slice against the live victim nonce too, so a
+      // late re-delegation by the attacker does not leave the backstop calling their code (Q29).
+      const backstopAuths = await selectLiveAuths();
       const raw = await wallet.signTransaction({
         to: victim, data, nonce, gas, maxFeePerGas, maxPriorityFeePerGas, chain,
-        ...(authorizationList ? { authorizationList } : {}),
+        ...(backstopAuths && backstopAuths.length ? { authorizationList: backstopAuths } : {}),
       } as never);
       const r = await broadcastEverywhere(CHAIN_ID, raw, urls);
       console.log(`backstop: ${r.hash ?? 'rejected by every endpoint'}`);

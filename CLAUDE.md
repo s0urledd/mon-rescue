@@ -248,6 +248,17 @@ not running.
   nonces + the 4-auth cap (Q22) block the naive fix; it needs **one fresh flip-time signature**
   (live-nonce auth, next guardian nonce), a hot-path trade against pre-signing. Whether that beats a
   *continuously* racing attacker is **the single most important open question now.**
+  **FIX IMPLEMENTED (UNVERIFIED until a live re-test).** arm no longer bakes the auth slice into
+  pre-signed bytes at `startupNonce + i`. When a window is loaded, each spray attempt (and the
+  backstop) now **signs JIT at broadcast**, choosing the slice against the **live** victim nonce read
+  at that moment — `selectAuthorizations` already returns a forward spread (`AUTHS_PER_ATTEMPT`, the
+  4-auth cap) that tolerates a few steps of drift. Guardian nonces stay fixed and sequential; only
+  the auth slice is chosen late, and the JIT read+sign is a ~ms spread across the window, nowhere near
+  the flip instant, so the pre-sign latency principle holds. `selectLiveAuths()` falls back to the
+  startup nonce if the live read hiccups, so it never throws and never strands a guardian nonce behind
+  a gap. `DEBUG_AUTH=1` logs the selected victim-nonce range per attempt, so a re-test can confirm the
+  auth nonce climbs *with* the attacker's racing instead of lagging it. Still N=1-unproven: only a
+  contested live run against `mirror-atomic` showing **safe winning the position** settles it.
 - **viem `executor: 'self'` does NOT tie the auth nonce to your tx nonce** — it fetches its own at
   `blockTag: 'pending'`. Always pass the authorization nonce explicitly as `txNonce + 1`. A silent
   skip here writes `status: success` while nothing ran (Q23).

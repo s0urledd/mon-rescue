@@ -35,7 +35,17 @@ import { broadcastEverywhere } from './broadcast.js';
 
 export interface SprayAttempt {
   nonce: number;
-  raw: `0x${string}`;
+  /** Pre-signed bytes — used when there is no anti-revoke window to track. */
+  raw?: `0x${string}`;
+  /**
+   * Just-in-time signer, used when an anti-revoke window IS loaded. It reads the LIVE victim
+   * nonce at broadcast and bakes in a matching authorization slice. A sponsored attacker marches
+   * the victim nonce faster than any startup-anchored pre-signed slice can track, so the slice
+   * must be chosen at the last possible moment, not up front (Q29). Exactly one of `raw` / `sign`
+   * is set; `sign` is self-contained and does not throw (it falls back to the startup nonce if the
+   * live read fails), so a signing hiccup never strands a guardian nonce behind a gap.
+   */
+  sign?: () => Promise<`0x${string}`>;
 }
 
 export interface SprayParams {
@@ -112,7 +122,10 @@ export async function spray(p: SprayParams): Promise<SprayResult> {
 
     const attempt = p.attempts[i]!;
     const t0 = Date.now();
-    const result = await broadcastEverywhere(p.chainId, attempt.raw, p.urls);
+    // Resolve the bytes at the last moment: a windowed attempt signs here, JIT, so its
+    // authorization slice is chosen against the live victim nonce rather than a stale anchor.
+    const raw = attempt.raw ?? (await attempt.sign!());
+    const result = await broadcastEverywhere(p.chainId, raw, p.urls);
     const ms = Date.now() - t0;
     sent++;
     i++;
