@@ -257,8 +257,22 @@ not running.
   the flip instant, so the pre-sign latency principle holds. `selectLiveAuths()` falls back to the
   startup nonce if the live read hiccups, so it never throws and never strands a guardian nonce behind
   a gap. `DEBUG_AUTH=1` logs the selected victim-nonce range per attempt, so a re-test can confirm the
-  auth nonce climbs *with* the attacker's racing instead of lagging it. Still N=1-unproven: only a
-  contested live run against `mirror-atomic` showing **safe winning the position** settles it.
+  auth nonce climbs *with* the attacker's racing instead of lagging it.
+  **FIX VERIFIED — it WON the position (Q30).** Epoch 1106, same mirror-atomic attacker, 1.8× outbid:
+  safe **+100.22 MON (the position)**, attacker sink **+19.95 (only the loose)**, victim at the floor.
+  The live-nonce authorization tracked the racing nonce, so `rescue()` ran OUR code (not the drainer)
+  and swept the position to the safe — Q28/Q29's exact loss, flipped. The loose going to the attacker
+  is fine: it is liquid and undefendable; the staked position is the win. **N=1 win vs N=2 pre-fix
+  losses** — strong signal, not proof of always-win. The open frontier is a *continuously* racing
+  attacker that outruns the 4-auth forward spread between arm's live read and the block.
+- **Completion detection: size success against the POSITION, never loose + position (Q30).** The win
+  above was first reported as a FAILURE (`succeeded=false`, "funds left without us", exit 1) because
+  `doneThreshold` was `loose + 90%·position` and a position-only win (attacker took the loose)
+  delivered less than that. Fixed: `doneThreshold = 90%·position` alone, and `isDone()` also requires
+  the position slot to be empty so a large loose sweep with the position still pending can't
+  masquerade as a win. No funds were at risk — it was a false alarm — but in production a false
+  "failure" triggers wasted retries and operator panic. The loose is undefendable; never make
+  rescuing it a condition of success.
 - **viem `executor: 'self'` does NOT tie the auth nonce to your tx nonce** — it fetches its own at
   `blockTag: 'pending'`. Always pass the authorization nonce explicitly as `txNonce + 1`. A silent
   skip here writes `status: success` while nothing ran (Q23).

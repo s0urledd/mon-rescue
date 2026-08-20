@@ -364,7 +364,14 @@ async function main() {
   // So the bar is what a premature sweep delivers PLUS the position. Below it, only loose money
   // has moved; above it, the position has. Independent of the ratio between them.
   const prematureSweep = planSweep(startBalance, 0n).sweepable;
-  const doneThreshold = prematureSweep + (totalAmount * 9n) / 10n;
+  // Success is the POSITION reaching the safe — 90% of it, allowing for rewards/rounding and the
+  // attacker spending the account's gas. Do NOT add the loose balance: the loose is liquid and
+  // undefendable (the attacker can sweep it), so requiring loose + position made a clean position
+  // win — where the attacker took only the loose — read as a failure (Q30). The premature-sweep
+  // confusion the old threshold guarded against is handled where it belongs: `isDone` also requires
+  // the position slot to be empty, so a large loose sweep with the position still pending can never
+  // count as done.
+  const doneThreshold = (totalAmount * 9n) / 10n;
   console.log(`\nreserve floor ${formatEther(plan.floor)} MON, sweepable ${formatEther(plan.sweepable)} MON`);
   if (plan.stranded > 0n) {
     console.warn(`  ${formatEther(plan.stranded)} MON will be stranded; releasing it needs an ` +
@@ -628,12 +635,29 @@ async function main() {
   // `victim balance + totalAmount - floor`; a premature dust sweep delivers `balance - floor`,
   // which is smaller by exactly the position. 90% of the position separates them with room for
   // the balance drifting as the attacker spends gas.
-  const isDone = makeSafeBalanceChecker(client, safeAddress, safeBaseline, doneThreshold);
+  // Won only if BOTH hold: the safe now holds ~the position, AND the position slot is consumed.
+  // Either alone is ambiguous — a large loose sweep clears the balance bar without the position
+  // being claimed, and an empty slot can mean the ATTACKER claimed it (the safe gains nothing).
+  // The balance read gates the slot reads, so the extra RPCs only fire once we are plausibly done.
+  const safeGained = makeSafeBalanceChecker(client, safeAddress, safeBaseline, doneThreshold);
+  const isDone = async (): Promise<boolean> => {
+    if (!(await safeGained())) return false;
+    try {
+      for (const p of batch) {
+        const r = await getWithdrawalRequest(client, p.validatorId, victim, p.withdrawId);
+        if (!isEmptySlot(r.withdrawalAmount, r.withdrawEpoch)) return false; // position not in the safe yet
+      }
+      return true;
+    } catch {
+      return false; // a failed read is not evidence of success
+    }
+  };
   console.log(`safe baseline ${formatEther(safeBaseline)} MON`);
   console.log(
-    `  done when the safe gains >= ${formatEther(doneThreshold)} MON — ` +
-      `${formatEther(prematureSweep)} of loose balance plus 90% of the ${formatEther(totalAmount)} ` +
-      `MON position. A premature sweep alone is progress, not completion.`,
+    `  done when the safe holds >= ${formatEther(doneThreshold)} MON (90% of the ` +
+      `${formatEther(totalAmount)} MON position) AND the position slot is empty. The loose balance ` +
+      `(${formatEther(prematureSweep)} MON) is not required — it is liquid and the attacker may take ` +
+      `it; the staked position is the win.`,
   );
 
   /**

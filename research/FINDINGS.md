@@ -549,6 +549,66 @@ Two further constraints that bite the hot path specifically:
 
 ---
 
+## Q30 — The live-nonce anti-revoke fix WINS the position: first defeat of the mirror-design attacker
+
+The Q29 fix — selecting the authorization slice against the **live** victim nonce at broadcast (JIT),
+instead of a startup-anchored `startupNonce + i` — got its first contested live test. Same
+mirror-atomic attacker that won Q28 (parity) and Q29 (3× outbid), same rebuilt position (validator
+40, slot 0, 100 MON, epoch 1106), same 100% coverage on both sides. Fee this run was **1.8×** (arm 135
+gwei, attacker 75 — they sampled p90 = 5 vs arm's 3; still a clean, locked outbid).
+
+### Result — WE WON THE POSITION, verified on-chain (epoch 1106, flip block 55,255,035)
+
+| measurement | value |
+|---|---|
+| **safe (us)** | 1024.610953 → 1124.828098 = **+100.22 MON** — the 100 MON position |
+| sink (attacker) | 88.251699 → 108.205058 = **+19.95 MON** — the loose balance only |
+| victim | **10.000000** (floor) |
+| victim delegation (final) | our rescue contract |
+
+The staked position reached the safe. The attacker got only the ~20 MON of liquid loose balance above
+the floor. Q28 and Q29 lost this exact position to this exact attacker; the fix flipped it.
+
+### Mechanism — the fix doing its job
+
+The victim's nonce raced exactly as in Q29 (the attacker's marching sponsored re-delegations). But
+this run arm selected its re-assertion slice against the **live** nonce at each broadcast, so its
+attempt in the flip block carried a valid authorization at the live nonce. That authorization
+re-delegated victim→rescue, `rescue()` ran OUR code (not the attacker's drainer), withdrew the
+position, and swept it to the safe. The 1.8× fee ordered arm's transaction ahead of the attacker's
+drain in the flip block; the live authorization made that ordering count. Q29's failure mode — a
+first-ordered transaction running the attacker's code because its authorization was stale — does not
+recur.
+
+### The loose went to the attacker — and that is fine
+
+The ~20 MON the attacker took is the victim's **liquid** balance above the reserve floor. Liquid MON
+is undefendable by the threat model (a seed holder sweeps it in one block); the product defends the
+**staked** position, which we won. This is the intended division, not a partial failure.
+
+### A completion-detection bug this surfaced (fixed)
+
+arm reported the win as a FAILURE: `spray succeeded=false`, `backstop reverted … the funds left
+without us`, exit code 1 — while the safe held the position. Cause: `doneThreshold` was
+`prematureSweep(loose) + 90% × position` = 109.95 MON, but a position-only win (attacker took the
+loose) delivered 100.22 MON < 109.95, so `isDone()` never fired and the loop fell through to the
+pessimistic backstop path. Requiring the loose was the error — the loose is undefendable and may go
+to the attacker. Fixed: `doneThreshold` is now `90% × position` alone, and `isDone()` additionally
+requires the position slot to be empty (so a large loose sweep with the position still pending cannot
+masquerade as a win either). With the fix, `isDone()` fires at 100.22 ≥ 90 with the slot consumed →
+"rescue landed", exit 0. No funds were ever at risk from this — it was a false alarm, not a loss.
+
+### Honest limits
+
+N=1 win, against N=2 losses (Q28, Q29) before the fix — strong evidence the fix flips the outcome,
+not proof it always wins. The outbid was 1.8× (not 3×), so a modest outbid plus a live authorization
+sufficed here; the interaction of the two at the margin is unmapped. A *continuously* racing attacker
+that outruns the 4-authorization forward spread between arm's live read and the block is still the
+open frontier. Artifact: `research/artifacts/battle-mirror-atomic.json`; safe swept the position in
+block 55,255,035.
+
+---
+
 ## Q29 — Outbidding 3× does NOT recover the loss: the real race is the anti-revoke nonce race, not the fee
 
 Q28 said the mirror-design attacker wins at parity and left one lever untested: **outbid**. This
