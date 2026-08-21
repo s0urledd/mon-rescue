@@ -549,6 +549,58 @@ Two further constraints that bite the hot path specifically:
 
 ---
 
+## Q31 — Max-race stress: a 10/block burst exhausts a thin window (a test-setup error, not the fix's ceiling)
+
+Q30 left an open frontier: an attacker that marches the victim nonce faster than the live-nonce fix
+can track. This run engaged `MAX_RACE=10` — the attacker bursts ~10 drains/block instead of one,
+marching the victim nonce as fast as its inflight gas budget allows. Same fixed arm, clean 3× outbid
+(arm 225 gwei, attacker 75, both p90=5), 100% coverage, sponsor funded to 105 MON.
+
+### Result — the attacker won, verified on-chain (epoch 1111, flip block 55,505,052)
+
+| measurement | value |
+|---|---|
+| safe (us) | 904.823754 → 924.777113 = **+19.95 MON** (loose only) |
+| sink (attacker) | 108.205058 → 208.240403 = **+100.04 MON** (the position) |
+| victim | **10.000000** (floor) |
+| victim delegation (final) | **the attacker's drainer** (`0x2d8c…`) — we never re-asserted |
+
+### But this did NOT test the fix — the window was under-sized
+
+The cause is not the 4-authorization spread this run meant to probe. It is **window exhaustion**, and
+it is a test-setup error:
+
+- arm's window was **465..536 — 72 nonces** (`AUTH_WINDOW_SIZE=72`, sized for Q30's ~1/block attacker).
+- The `MAX_RACE=10` burst marched the victim nonce to **~1088** (`nonce_advanced: 992 → 1047 → 1088`).
+- 1088 is **far past the window ceiling (536)**: the window was entirely exhausted. No authorization
+  existed for the live nonce, so the live-selection had nothing valid to pick, arm ran the drainer's
+  code, and never re-asserted. The safe kept only the ~20 MON of loose it swept from early in-window
+  attempts; the attacker took the position and the delegation stayed on the drainer.
+
+`AUTH_WINDOW_SIZE=72` was hopeless for a ~10/block burster (~600 nonces of burn). The run conflated
+**limit A (window too small)** with **limit B (the 4-auth spread vs the burn between arm's read and
+the block)** — and limit A killed it first. The fix's true ceiling remains unmeasured.
+
+### The real finding
+
+The anti-revoke window must be sized against the attacker's **burst rate**, not the normal marching
+rate. A window that only covers ~1 nonce per flip-window block is exhausted by a burster for the price
+of gas (~48 MON here to burn ~600 nonces against a 100 MON position — rational for the attacker).
+`assessWindow` called 72 "healthy" because it only measures headroom at rest; arm now additionally
+warns when the headroom is thin relative to the flip span (`AUTH_WINDOW_BURST_PER_BLOCK`, default 8),
+so a thin window can't silently look safe before a burst.
+
+### Next — the clean test
+
+Re-run `MAX_RACE=10` with a window that actually covers the burst (`AUTH_WINDOW_SIZE` ~1000, covering
+~1088+). If arm then wins, window-sizing is the lever and the fix holds against a burster. If it still
+loses with the window covering the live nonce, **limit B** is real — the burn between arm's live read
+and the block outruns the 4-auth forward spread — and the answer is to send several authorization-diverse
+attempts into the flip block (widening coverage past 4), which is the next build. Either outcome is
+clean; this one was not. Artifact: `research/artifacts/battle-mirror-atomic.json`.
+
+---
+
 ## Q30 — The live-nonce anti-revoke fix WINS the position: first defeat of the mirror-design attacker
 
 The Q29 fix — selecting the authorization slice against the **live** victim nonce at broadcast (JIT),

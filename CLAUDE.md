@@ -265,6 +265,19 @@ not running.
   is fine: it is liquid and undefendable; the staked position is the win. **N=1 win vs N=2 pre-fix
   losses** — strong signal, not proof of always-win. The open frontier is a *continuously* racing
   attacker that outruns the 4-auth forward spread between arm's live read and the block.
+- **The anti-revoke window must be sized to the attacker's BURST rate, not the marching rate (Q31).**
+  `MAX_RACE=10` (attacker bursts ~10 drains/block) marched the victim nonce to ~1088 while arm's window
+  was only 465..536 (`AUTH_WINDOW_SIZE=72`) — the window was fully **exhausted**, so live selection had
+  nothing valid to pick and the attacker took the position (safe +19.95 loose only). But this was a
+  **test-setup error**, not the fix's ceiling: 72 nonces was sized for Q30's ~1/block attacker; a
+  ~10/block burster marches ~600. It conflated limit A (window too small) with limit B (the 4-auth
+  spread), and A died first — the fix's true limit is still unmeasured. `assessWindow` still called 72
+  "healthy" (it only measures headroom at rest), so arm now also warns when headroom is thin relative
+  to the flip span (`AUTH_WINDOW_BURST_PER_BLOCK`, default 8). **Clean re-test:** `MAX_RACE=10` with
+  `AUTH_WINDOW_SIZE` ~1000 (covering the burn). If arm wins, window-sizing is the lever; if it still
+  loses with the window covering the live nonce, limit B is real → send several auth-diverse attempts
+  into the flip block to widen coverage past 4. A window is not free to a burster: ~600 burned nonces
+  cost the attacker ~48 MON in gas here — so a well-sized window turns exhaustion into an expense.
 - **Completion detection: size success against the POSITION, never loose + position (Q30).** The win
   above was first reported as a FAILURE (`succeeded=false`, "funds left without us", exit 1) because
   `doneThreshold` was `loose + 90%·position` and a position-only win (attacker took the loose)

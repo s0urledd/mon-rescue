@@ -516,6 +516,22 @@ async function main() {
     if (health.needsRefresh || health.exhausted) {
       console.warn(`  WARN: ${health.message}`);
     }
+    // Burst check. Live selection re-asserts only while the live nonce is still INSIDE the window;
+    // a sponsored attacker can march the victim nonce many per block, and Q31 saw ~10/block exhaust a
+    // 72-nonce window and take the position. The window has to cover the worst-case burn ACROSS the
+    // flip span, not one nonce per block. Warn loudly when it is thin — this is not the same as
+    // assessWindow's "healthy", which only measures headroom at rest.
+    const flipSpan = Number(latestStartBlockFor(targetEpoch) - sprayStartBlockFor(targetEpoch));
+    const burstPerBlock = Number(process.env.AUTH_WINDOW_BURST_PER_BLOCK ?? 8);
+    const recommended = Math.max(1, flipSpan) * burstPerBlock;
+    if (health.headroom < recommended) {
+      console.warn(
+        `  WARN: window headroom ${health.headroom} may not survive a BURSTING attacker over the ` +
+          `~${flipSpan}-block flip window (Q31: a ~10 nonce/block burst exhausted a 72-nonce window and ` +
+          `took the position). Re-sign wider: AUTH_WINDOW_SIZE >= ~${recommended} ` +
+          `(${burstPerBlock}/block x ${flipSpan}); tune the assumed rate with AUTH_WINDOW_BURST_PER_BLOCK.`,
+      );
+    }
   }
 
   // --- pre-arm simulation --------------------------------------------------
