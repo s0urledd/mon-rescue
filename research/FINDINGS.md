@@ -549,6 +549,72 @@ Two further constraints that bite the hot path specifically:
 
 ---
 
+## Q32 — Limit B, cleanly measured: the live-nonce fix TRACKS the burst but the 4-auth cap is exceeded
+
+The clean version of Q31: same `MAX_RACE=10` burster, but this time arm's window covered the burst
+(`AUTH_WINDOW_SIZE=1200`, nonces 1092..2291) so window exhaustion (limit A) was off the table, a clean
+3× outbid (arm 225 gwei, attacker pinned 75 — the raw p90 was ~5, so the attacker's 1530 first sample
+was an outlier artifact, corrected with `MIRROR_TIP_GWEI=75`), and the victim reset to our rescue
+contract via the new `redelegate` step. The only remaining variable was **limit B**: does arm's 4-auth
+forward spread survive the burn between its live read and the block?
+
+### Result — the attacker took everything, verified on-chain (epoch 1120, flip block 55,955,037)
+
+| measurement | value |
+|---|---|
+| safe (us) | 749.772759 → 749.772759 = **+0 MON** |
+| sink (attacker) | 208.240403 → 313.183562 = **+104.94 MON** (position + loose) |
+| victim | **10.000000** (floor) |
+| victim delegation (final) | our rescue contract (re-asserted after the funds were gone) |
+
+### The fix WORKED — `DEBUG_AUTH` proves it tracked the racing nonce
+
+```
+nonce_advanced: 1659 -> 1715
+    re-assert @ victim nonce 1715..1718      <- selection climbed to 1715
+    re-assert @ victim nonce 1719..1722
+    re-assert @ victim nonce 1723..1726
+    ...
+    re-assert @ victim nonce 1767..1770      <- ...and to 1767
+nonce_advanced: 1767 -> 1775
+```
+
+Unlike Q29 (the slice stuck at the startup nonce 322), here arm's live selection **climbed with the
+attacker's racing nonce** — 1715, 1719, 1723, … 1767, 1771. The live-nonce fix did exactly its job.
+
+### Why it still lost — limit B, precisely
+
+The nonce raced ~7–10 per block (1659 → 1775 across the window). arm reads the live nonce N, selects
+`[N..N+3]`, signs, and broadcasts — but between that read and the block's execution the attacker burns
+**more than 4** nonces (read 1767, the block landed at 1775 — **+8**). So arm's authorization was fresh
+at READ time and **stale at EXECUTION**: the four nonces it covered were already consumed. With no valid
+re-assertion, `rescue()` ran the attacker's drainer code and reverted, all 64 attempts.
+
+The 4-nonce ceiling is the **RPC-enforced authorization-list cap** (Q22), not a code choice. A burster
+sustaining more than ~4 nonces/block *in the read-to-block gap* defeats a single-transaction spread no
+matter how live the selection is. **The live-nonce fix is necessary (Q30 won at ~1/block) but not
+sufficient against a deliberate fast burster.**
+
+### The product ceiling, now fully mapped
+
+- ~97% field (naive, ~1/block, non-adaptive): **we win** (live wins, Q24/Q27/Q30).
+- mirror-design attacker at normal marching rate: **we win** (the live-nonce fix, Q30).
+- mirror-design attacker **bursting** (>~4/block through the flip, ~50 MON of gas, and knowledge of our
+  defense): **we lose** (limit B, this run) — until the next fix lands.
+
+### Next fix — the multi-transaction cluster
+
+Widen coverage past the 4-auth cap by sending **K authorization-diverse attempts into each flip-window
+block**: attempt j carries `[N+4j .. N+4j+3]`, so K of them cover `[N .. N+4K-1]` — a 4K-nonce spread.
+All bid the outbid fee, so all order ahead of the attacker's drains; whichever one's slice matches the
+live nonce at execution re-asserts and wins, the rest revert cheaply. K=4 → 16-nonce tolerance, which
+covers a ~10/block burst comfortably. Cost is K× the spray gas, acceptable under "cost is not the
+constraint". (An anticipatory variant — shift the spread forward by the *estimated* burn — is cheaper
+but a bet a varying attacker can game; the cluster covers a range instead of predicting a point.)
+Artifact: `research/artifacts/battle-mirror-atomic.json`.
+
+---
+
 ## Q31 — Max-race stress: a 10/block burst exhausts a thin window (a test-setup error, not the fix's ceiling)
 
 Q30 left an open frontier: an attacker that marches the victim nonce faster than the live-nonce fix

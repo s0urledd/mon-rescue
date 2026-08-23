@@ -278,6 +278,18 @@ not running.
   loses with the window covering the live nonce, limit B is real → send several auth-diverse attempts
   into the flip block to widen coverage past 4. A window is not free to a burster: ~600 burned nonces
   cost the attacker ~48 MON in gas here — so a well-sized window turns exhaustion into an expense.
+- **Limit B is real, cleanly measured (Q32). The 4-auth cap, not the code, is the ceiling.** Re-ran
+  `MAX_RACE=10` with the window covering the burst (1092..2291), clean 3× outbid, victim reset to rescue.
+  `DEBUG_AUTH` proved the live selection **tracked** the racing nonce (re-assert climbed 1715→1771, not
+  stuck as in Q29) — the fix did its job. But arm still lost the whole position (safe +0, sink +104.94):
+  the nonce raced ~7–10/block, and between arm's live read and the block's execution the attacker burned
+  **>4** (read 1767, block landed at 1775), so the authorization was fresh at read and STALE at execution.
+  The 4-nonce spread is the RPC auth-list cap (Q22), not a choice. **The live-nonce fix is necessary
+  (Q30) but not sufficient against a deliberate fast burster.** Product ceiling now fully mapped: we win
+  the ~97% field and the mirror attacker at normal rate; a burster (>4/block, ~50 MON gas, knows our
+  defense) beats us until the **multi-tx cluster** lands — send K auth-diverse attempts per flip block
+  (`[N+4j..N+4j+3]`), covering 4K nonces; all outbid, so whichever slice matches the live nonce wins.
+  K=4 → 16-nonce tolerance, covers ~10/block. Cost K× spray gas (acceptable). Not yet built.
 - **Completion detection: size success against the POSITION, never loose + position (Q30).** The win
   above was first reported as a FAILURE (`succeeded=false`, "funds left without us", exit 1) because
   `doneThreshold` was `loose + 90%·position` and a position-only win (attacker took the loose)
