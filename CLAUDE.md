@@ -289,7 +289,14 @@ not running.
   the ~97% field and the mirror attacker at normal rate; a burster (>4/block, ~50 MON gas, knows our
   defense) beats us until the **multi-tx cluster** lands — send K auth-diverse attempts per flip block
   (`[N+4j..N+4j+3]`), covering 4K nonces; all outbid, so whichever slice matches the live nonce wins.
-  K=4 → 16-nonce tolerance, covers ~10/block. Cost K× spray gas (acceptable). Not yet built.
+  K=4 → 16-nonce tolerance, covers ~10/block. Cost K× spray gas (acceptable).
+- **Multi-tx cluster BUILT, UNVERIFIED (Q33).** `CLUSTER_SIZE` (default 1 = unchanged) makes each spray
+  slot fire K auth-diverse transactions into one flip block: member j re-asserts at `liveNonce+4j`, so K
+  members span `[N..N+4K-1]`; sequential guardian nonces, same fee step (all order ahead), cluster-paced
+  spray, budget/inflight counted in slots × K. Typechecks clean. **Not battle-tested** — the clean run is
+  `CLUSTER_SIZE=4 DEBUG_AUTH=1` vs `MAX_RACE=10` with `AUTH_WINDOW_SIZE`~1200; PASS = safe takes the
+  position (not just loose) AND a `[cluster j]` slice matches the live nonce at the flip. Until that lands
+  on-chain the burster gap is NOT proven closed.
 - **Completion detection: size success against the POSITION, never loose + position (Q30).** The win
   above was first reported as a FAILURE (`succeeded=false`, "funds left without us", exit 1) because
   `doneThreshold` was `loose + 90%·position` and a position-only win (attacker took the loose)

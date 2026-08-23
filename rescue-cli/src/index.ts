@@ -100,6 +100,21 @@ const AUTHS_PER_ATTEMPT = (() => {
 })();
 
 /**
+ * Authorization-diverse transactions fired into EACH flip-window block — the multi-tx cluster.
+ *
+ * One transaction can carry only AUTHS_PER_ATTEMPT (4) authorizations (Q22 RPC cap), so a single
+ * attempt tolerates only ~4 nonces of drift between arm's live nonce read and the block. A fast
+ * burster marches the victim nonce past that in the read-to-block gap and wins even when the live
+ * selection tracks correctly (Q32). Firing K auth-diverse attempts per block — attempt j covering
+ * `[N+4j .. N+4j+3]` — widens the covered range to `4*K` nonces; all bid the same outbid fee, so
+ * they all order ahead of the attacker's drains, and whichever slice matches the live nonce at
+ * execution re-asserts and wins while the rest revert cheaply. K=4 tolerates ~16 nonces, covering a
+ * ~10/block burst. Default 1 is the single-attempt behaviour; raise it (CLUSTER_SIZE) to trade K×
+ * the spray gas for burst tolerance — cost, not liveness, so it is the operator's call.
+ */
+const CLUSTER = Math.max(1, Number(process.env.CLUSTER_SIZE ?? 1));
+
+/**
  * Resolve a configured path against the repo root rather than the process cwd.
  *
  * `pnpm --filter <pkg> <script>` runs with the cwd set to that package's directory, so a
@@ -431,11 +446,16 @@ async function main() {
   // rescue it could still make, just with fewer shots. Keep a margin so the last attempt is
   // not the one that empties the account mid-flight.
   const affordableByBalance = Number((guardianBalance * 9n) / (10n * gas * maxFeePerGas));
-  const attemptCount = Math.max(1, Math.min(affordable, affordableByBalance, 64));
-  if (affordableByBalance < affordable) {
+  // Each spray SLOT fires CLUSTER auth-diverse transactions, so the budget/balance (counted in
+  // transactions) covers slots = affordable_tx / CLUSTER.
+  const attemptCount = Math.max(
+    1,
+    Math.min(Math.floor(affordable / CLUSTER), Math.floor(affordableByBalance / CLUSTER), 64),
+  );
+  if (Math.floor(affordableByBalance / CLUSTER) < Math.floor(affordable / CLUSTER)) {
     console.log(
-      `\nguardian balance caps this at ${attemptCount} attempt(s) ` +
-        `(budget alone would allow ${Math.min(affordable, 64)}).`,
+      `\nguardian balance caps this at ${attemptCount} slot(s) ` +
+        `(budget alone would allow ${Math.min(Math.floor(affordable / CLUSTER), 64)}).`,
     );
   }
 
@@ -447,7 +467,8 @@ async function main() {
   if (!pf.ok) throw new Error('preflight failed');
 
   console.log(
-    `\nbudget ${formatEther(budget)} MON -> ${attemptCount} attempt(s) at ${gas} gas ` +
+    `\nbudget ${formatEther(budget)} MON -> ${attemptCount} slot(s)` +
+      `${CLUSTER > 1 ? ` x ${CLUSTER} auth-diverse = ${attemptCount * CLUSTER} tx` : ''} at ${gas} gas ` +
       `x ${formatEther(maxFeePerGas)} MON/gas (inflight cap ~${inflightCap})`,
   );
 
@@ -500,18 +521,22 @@ async function main() {
   // the current nonce and returns a forward spread that tolerates a few steps of drift; the fix is
   // simply to read that nonce at the last moment. So each windowed attempt signs just-in-time (a
   // millisecond spread across the window, nowhere near the flip instant) rather than up front.
-  const selectLiveAuths = async (): Promise<SignedAuthorization[] | undefined> => {
+  const selectLiveAuths = async (offset = 0): Promise<SignedAuthorization[] | undefined> => {
     if (!window) return undefined;
     let n = victimNonce; // startup nonce as a floor if the live read hiccups — never throw here
     try { n = await client.getTransactionCount({ address: victim }); } catch { /* keep the floor */ }
-    return selectAuthorizations(window, n, AUTHS_PER_ATTEMPT);
+    // `offset` positions this attempt within its cluster: member j reads [n+offset .. n+offset+3], so
+    // the K members of a slot together span [n .. n + 4K-1] and one matches wherever the racing nonce
+    // has landed by execution — past the single-attempt 4-nonce ceiling (Q32).
+    return selectAuthorizations(window, n + offset, AUTHS_PER_ATTEMPT);
   };
   if (window) {
     const health = assessWindow(window, victimNonce);
     console.log(
-      `carrying ${AUTHS_PER_ATTEMPT} authorization(s) per attempt, selected LIVE against the ` +
-        `victim nonce at broadcast — window covers ${window.startNonce}..${windowCeiling(window)}, ` +
-        `${health.headroom} nonce(s) of headroom now`,
+      `carrying ${AUTHS_PER_ATTEMPT} authorization(s) per attempt` +
+        `${CLUSTER > 1 ? ` x ${CLUSTER} auth-diverse attempts/block = ${AUTHS_PER_ATTEMPT * CLUSTER}-nonce span` : ''}, ` +
+        `selected LIVE against the victim nonce at broadcast — window covers ` +
+        `${window.startNonce}..${windowCeiling(window)}, ${health.headroom} nonce(s) of headroom now`,
     );
     if (health.needsRefresh || health.exhausted) {
       console.warn(`  WARN: ${health.message}`);
@@ -549,7 +574,10 @@ async function main() {
     console.warn(`\nSKIP_PREARM_SIM=1 — arming without checking the failure paths.`);
   }
 
-  console.log(`\npre-signing ${attemptCount} attempt(s) from nonce ${baseNonce}...`);
+  console.log(
+    `\npre-signing ${attemptCount * CLUSTER} attempt(s)` +
+      `${CLUSTER > 1 ? ` (${attemptCount} slot(s) x ${CLUSTER} auth-diverse)` : ''} from nonce ${baseNonce}...`,
+  );
   const t0 = Date.now();
   // How many attempts cover the flip window. Broadcasting starts at sprayStartBlockFor and the
   // epoch must have flipped by latestStartBlockFor, so that span divided by the broadcast
@@ -558,9 +586,10 @@ async function main() {
   const windowBlocks = Number(latestStartBlockFor(targetEpoch) - sprayStartBlockFor(targetEpoch));
   const windowAttempts = Math.max(1, Math.ceil(windowBlocks / SPRAY_BLOCKS_PER_ATTEMPT) + 2);
   const schedule = feeSchedule(observed, gas, maxSpendPerAttempt, attemptCount, windowAttempts);
-  const windowCost = schedule
-    .slice(0, Math.min(windowAttempts, attemptCount))
-    .reduce((a, p) => a + p.costPerAttempt, 0n);
+  const windowCost =
+    schedule
+      .slice(0, Math.min(windowAttempts, attemptCount))
+      .reduce((a, p) => a + p.costPerAttempt, 0n) * BigInt(CLUSTER);
   console.log(
     `fee ladder: ${schedule[0]!.explanation} -> ${schedule[schedule.length - 1]!.explanation}`,
   );
@@ -580,9 +609,17 @@ async function main() {
   }
 
   const attempts: SprayAttempt[] = [];
-  for (let i = 0; i < attemptCount; i++) {
-    const step = schedule[i]!;
-    const guardianNonce = baseNonce + i;
+  // Each slot fires CLUSTER transactions back-to-back into one flip block. They all carry the same
+  // fee (the slot's schedule step) so they order together ahead of the attacker's drains; they
+  // differ only in which live-nonce authorization slice they re-assert — member j covers
+  // [liveNonce + 4j .. +4j+3]. Guardian nonces stay strictly sequential across the whole cluster
+  // (baseNonce + m), so a revert of the early members never strands a later one behind a gap.
+  const totalTx = attemptCount * CLUSTER;
+  for (let m = 0; m < totalTx; m++) {
+    const slot = Math.floor(m / CLUSTER);
+    const clusterPos = m % CLUSTER;
+    const step = schedule[slot]!;
+    const guardianNonce = baseNonce + m;
     const request = {
       to: victim, data, nonce: guardianNonce, gas,
       maxFeePerGas: step.maxFeePerGas,
@@ -590,16 +627,19 @@ async function main() {
       chain,
     };
     if (window) {
-      // JIT: pick the authorization slice against the LIVE victim nonce at broadcast (Q29 fix).
+      // JIT: pick the authorization slice against the LIVE victim nonce at broadcast (Q29 fix),
+      // offset by this member's position in the cluster so the K members span 4K nonces (Q32).
       // The guardian nonce stays fixed and sequential; only the auth slice is chosen late.
+      const authOffset = AUTHS_PER_ATTEMPT * clusterPos;
       attempts.push({
         nonce: guardianNonce,
         sign: async (): Promise<`0x${string}`> => {
-          const auths = await selectLiveAuths();
+          const auths = await selectLiveAuths(authOffset);
           // DEBUG_AUTH surfaces the live selection so a re-test can confirm the auth nonce climbs
           // WITH the attacker's nonce racing, rather than lagging behind it as in Q29.
           if (process.env.DEBUG_AUTH && auths?.length) {
-            console.log(`    re-assert @ victim nonce ${auths[0]!.nonce}..${auths[auths.length - 1]!.nonce}`);
+            const tag = CLUSTER > 1 ? `[cluster ${clusterPos}] ` : '';
+            console.log(`    ${tag}re-assert @ victim nonce ${auths[0]!.nonce}..${auths[auths.length - 1]!.nonce}`);
           }
           return wallet.signTransaction({
             ...request,
@@ -614,8 +654,8 @@ async function main() {
   }
   console.log(
     window
-      ? `prepared ${attemptCount} attempt(s) in ${Date.now() - t0}ms — each signs JIT at broadcast ` +
-          `with the live-nonce authorization`
+      ? `prepared ${totalTx} attempt(s)${CLUSTER > 1 ? ` (${attemptCount} slot(s) x ${CLUSTER})` : ''} ` +
+          `in ${Date.now() - t0}ms — each signs JIT at broadcast with the live-nonce authorization`
       : `pre-signed in ${Date.now() - t0}ms — the flip window will only broadcast`,
   );
 
@@ -815,8 +855,13 @@ async function main() {
       const result = await spray({
         chainId: CHAIN_ID, client, attempts: sprayMode === 'off' ? attempts.slice(1) : attempts, urls,
         intervalMs: Math.round(SPRAY_BLOCKS_PER_ATTEMPT * SECONDS_PER_BLOCK * 1000),
-        maxInFlight: Math.max(1, Math.min(SPRAY_MAX_IN_FLIGHT, inflightCap)),
+        // A cluster fires its CLUSTER members back-to-back into one block, so at least a full
+        // cluster must be allowed in flight at once; the chain's inflight gas cap still bounds it.
+        maxInFlight: Math.max(1, Math.min(SPRAY_MAX_IN_FLIGHT * CLUSTER, inflightCap)),
         inflightWindowMs: Math.round(3 * SECONDS_PER_BLOCK * 1000),
+        // Pace by SLOT, not by transaction: the cluster's members share a block, so the
+        // inter-attempt sleep applies once per CLUSTER broadcasts, not once per transaction.
+        clusterSize: CLUSTER,
         onAttempt: (nonce, hash, ms) =>
           console.log(`  nonce=${nonce} ${hash ?? 'REJECTED'} (${ms}ms)`),
         isDone,

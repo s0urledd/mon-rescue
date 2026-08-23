@@ -57,6 +57,15 @@ export interface SprayParams {
   /** Send at most one attempt per this many milliseconds. */
   intervalMs: number;
   /**
+   * Multi-tx cluster size. The attempts array is laid out as consecutive groups of `clusterSize`
+   * transactions that share a fee step and target the SAME flip block, differing only in which
+   * live-nonce authorization slice they re-assert (Q32). They must land together, so the
+   * inter-attempt `intervalMs` sleep is applied once per cluster (after every `clusterSize`
+   * broadcasts), not after every transaction — the members go back-to-back, then we pace to the
+   * next block. Defaults to 1 (every attempt is its own slot: the original per-attempt pacing).
+   */
+  clusterSize?: number;
+  /**
    * Stop once this many attempts are in flight without resolution. Monad caps an account's
    * total gas across inflight transactions (last 3 blocks) at min(10 MON, lagged balance), so
    * an unbounded spray throttles itself at exactly the wrong moment.
@@ -103,6 +112,7 @@ export async function spray(p: SprayParams): Promise<SprayResult> {
   // upward and throttled the spray harder the longer it ran.
   const sentAt: number[] = [];
   const inflightWindowMs = p.inflightWindowMs ?? 3 * 301;
+  const clusterSize = Math.max(1, p.clusterSize ?? 1);
 
   for (let i = 0; i < p.attempts.length; ) {
     if (await p.isDone()) {
@@ -133,7 +143,10 @@ export async function spray(p: SprayParams): Promise<SprayResult> {
     timeline.push({ nonce: attempt.nonce, ms, hash: result.hash });
     p.onAttempt?.(attempt.nonce, result.hash, ms);
 
-    await sleep(p.intervalMs);
+    // Pace by cluster, not by transaction: a cluster's members are meant to share one flip block,
+    // so we fire them back-to-back and only sleep once the cluster boundary is crossed. With
+    // clusterSize === 1 this is the original per-attempt cadence.
+    if (i % clusterSize === 0) await sleep(p.intervalMs);
   }
 
   const succeeded = await p.isDone();

@@ -549,6 +549,47 @@ Two further constraints that bite the hot path specifically:
 
 ---
 
+## Q33 — Multi-tx cluster BUILT to close limit B (UNVERIFIED — awaiting a clean re-test)
+
+The fix Q32 called for is now in `arm`, behind `CLUSTER_SIZE` (default 1 = the old single-attempt
+behaviour, so nothing changes until it is raised). It has **not** been battle-tested yet; this entry
+records the build and the exact re-test that would confirm or refute it.
+
+### What was built
+
+Each spray **slot** now fires `CLUSTER` authorization-diverse transactions back-to-back into the same
+flip-window block instead of one:
+
+- **Coverage.** Cluster member `j` selects its authorization slice at `liveNonce + 4j`, so the K
+  members of a slot span `[liveNonce .. liveNonce + 4K-1]` — a **4K-nonce** re-assertion range
+  (`selectLiveAuths(offset)` in `rescue-cli/src/index.ts`; the pre-sign loop iterates
+  `attemptCount * CLUSTER`, decomposing `m` into `slot = ⌊m/CLUSTER⌋`, `clusterPos = m % CLUSTER`).
+  K=4 → **16 nonces** of tolerance, past the single-attempt 4-nonce cap that lost Q32.
+- **Ordering.** All members carry the same fee step (the slot's schedule rung), so they order
+  together ahead of the attacker's drains under the priority-gas auction (Q7). Whichever member's
+  slice matches the live nonce at execution re-asserts and wins; the rest revert cheaply — a revert
+  leaves the withdrawal request intact (Q26), so a wasted member costs only gas.
+- **Nonces.** Guardian nonces stay strictly sequential across the whole cluster (`baseNonce + m`), so
+  an early member reverting never strands a later one behind a gap — the same discipline the spray
+  back-off already enforces.
+- **Pacing.** `spray()` takes `clusterSize` and applies the inter-attempt sleep once per cluster
+  (`i % clusterSize === 0`), firing the K members back-to-back and pacing only between blocks.
+- **Budget/inflight.** Affordability is counted in slots (`affordable / CLUSTER`); `maxInFlight`
+  scales to `SPRAY_MAX_IN_FLIGHT * CLUSTER` so a whole cluster can be in flight at once, still clamped
+  by the chain's `min(10 MON, balance)` inflight gas cap.
+
+### The clean re-test (not yet run)
+
+Same setup as Q32 (mirror-atomic attacker, `MAX_RACE=10`, window sized to cover the burst,
+`AUTH_WINDOW_SIZE`~1200), but arm runs with `CLUSTER_SIZE=4 DEBUG_AUTH=1`. Pass condition: the safe
+takes the **position** (`totalAmount`, not just loose), and `DEBUG_AUTH` shows a `[cluster j]` slice
+whose nonce matches the live victim nonce at the flip block. If it wins, limit B is closed for a
+~10/block burster and the lever is `CLUSTER_SIZE` vs. burst rate. If it still loses with the live
+nonce inside `[N .. N+4K-1]`, the burst outruns even the 4K spread and the next lever is a larger K
+or splitting the guardian across keys. **Until that run lands on-chain, this is UNVERIFIED.**
+
+---
+
 ## Q32 — Limit B, cleanly measured: the live-nonce fix TRACKS the burst but the 4-auth cap is exceeded
 
 The clean version of Q31: same `MAX_RACE=10` burster, but this time arm's window covered the burst
