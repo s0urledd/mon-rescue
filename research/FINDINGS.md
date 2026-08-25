@@ -549,6 +549,71 @@ Two further constraints that bite the hot path specifically:
 
 ---
 
+## Q34 — First cluster run LOST, and told us why: the members never shared a block (serial broadcast). Fixed, retest pending
+
+The clean re-test of Q33 ran (epoch 1134, flip block 56,655,000-ish, mirror-atomic `MAX_RACE=10`,
+`CLUSTER_SIZE=4`, window `1781..2980` covering the burst, arm 3× outbidding at 225 vs 75 gwei). arm
+**lost**: safe +0, sink **+104.98 MON** (100 position + ~5 loose), victim left delegated to the rescue
+contract but empty. Verified from the run output.
+
+### But the loss was the firing, not the cluster — and DEBUG_AUTH proved it
+
+Limit A is ruled out (live nonce 2760-2796 sat inside the 1781-2980 window) and the live selection
+tracked (cluster 0 read 2760→2768→2776→2784, climbing with the attacker). Yet the `[cluster j]`
+timeline showed the failure directly:
+
+```
+nonce=732 [cluster 1] @ 2764..2767   (240ms)   <- live ~2760
+nonce=733 [cluster 2] @ 2772..2775   (231ms)
+nonce=734 [cluster 3] @ 2780..2783   (203ms)
+nonce=735 [cluster 0] @ 2768..2771   (230ms)   <- live now 2768, a DIFFERENT read
+```
+
+Two defects, both making the cluster fail its own premise — the four members never occupied one block
+with a contiguous span:
+
+1. **Every broadcast took ~230ms**, and a block is 301ms, so a 4-member cluster smeared across ~2.3
+   blocks instead of landing together. Root cause: `broadcastEverywhere` called
+   `await Promise.allSettled(sends)` *after* `Promise.any` had already returned the fast local
+   acceptance (~10ms) — it then blocked on the slow remote RPCs on every single broadcast. The
+   comment said "never block on them"; the code did.
+2. **Each member re-read the live nonce independently** (its own `getTransactionCount`), so at
+   different times they read different bases (2760, then 2768) and produced overlapping, non-contiguous
+   ranges — never a clean `[L .. L+15]` for any one block.
+
+So the run never tested the 16-nonce span; it tested a smeared, gappy firing. This is the exact sibling
+of Q31 (there the window was too small; here the implementation was wrong) — a test-setup/impl defect,
+not the fix's ceiling.
+
+### The fix (built, UNVERIFIED)
+
+- **Non-blocking broadcast.** `broadcastEverywhere` now returns on the first acceptance and lets the
+  stragglers settle detached (`void Promise.allSettled`). Per-broadcast latency drops ~230ms → ~10ms.
+- **Cluster as a unit.** `spray()` reads the live victim nonce **once per cluster** (`readVictimNonce`),
+  hands it to every member's `sign(liveNonce)` so they tile a contiguous `[L .. L+4K-1]`, and fires the
+  members **concurrently** (`Promise.all`) so they hit the mempool within ~1ms of each other and land
+  in one block. The inflight gate admits a whole cluster as the unit.
+
+With ~10ms broadcasts, a 4-member cluster fires in ~20ms — one cluster per block, each covering the
+live nonce ±15. A ~10/block burst moves the nonce ~10 in the ~1-block read-to-execution gap, inside the
+span. Non-matching members run `rescue()` calldata against the drainer, whose selector does not match
+and which has no fallback (see `AdversaryDrainer.sol`), so they revert harmlessly — no help to the
+attacker in this harness. (Against a *real* sweeper with a sweeping fallback, a non-matching member
+could sweep the victim's liquid — already undefendable — but not the staked position, which needs
+`withdraw(validator, id)` args a generic fallback won't supply.)
+
+### Retest (same as Q33's)
+
+`CLUSTER_SIZE=4 DEBUG_AUTH=1` vs `MAX_RACE=10`, window ~1200. **Now the pass evidence is stronger:**
+each cluster's four `[cluster j]` lines must show a **contiguous** `L, L+4, L+8, L+12` tiling off one
+base (not the overlapping reads above), and one must contain the live nonce at the flip. If arm then
+takes the position, limit B is closed for a 10/block burster and the ceiling becomes burst-rate vs
+`4K / (read-to-execution blocks)`. If it still loses with a clean contiguous tiling over the live
+nonce, the burst genuinely outruns the span and the next lever is larger K or more guardian keys.
+**UNVERIFIED until it lands on-chain.**
+
+---
+
 ## Q33 — Multi-tx cluster BUILT to close limit B (UNVERIFIED — awaiting a clean re-test)
 
 The fix Q32 called for is now in `arm`, behind `CLUSTER_SIZE` (default 1 = the old single-attempt
