@@ -38,14 +38,20 @@ export interface SprayAttempt {
   /** Pre-signed bytes — used when there is no anti-revoke window to track. */
   raw?: `0x${string}`;
   /**
-   * Just-in-time signer, used when an anti-revoke window IS loaded. It reads the LIVE victim
-   * nonce at broadcast and bakes in a matching authorization slice. A sponsored attacker marches
-   * the victim nonce faster than any startup-anchored pre-signed slice can track, so the slice
-   * must be chosen at the last possible moment, not up front (Q29). Exactly one of `raw` / `sign`
-   * is set; `sign` is self-contained and does not throw (it falls back to the startup nonce if the
-   * live read fails), so a signing hiccup never strands a guardian nonce behind a gap.
+   * Just-in-time signer, used when an anti-revoke window IS loaded. It bakes in an authorization
+   * slice matching the LIVE victim nonce. A sponsored attacker marches the victim nonce faster than
+   * any startup-anchored pre-signed slice can track, so the slice must be chosen at the last
+   * possible moment, not up front (Q29).
+   *
+   * The live nonce is read ONCE per cluster by spray and passed in here, not read per-attempt: the
+   * K members of a cluster must tile a CONTIGUOUS `[liveNonce .. liveNonce + 4K-1]` span for the
+   * SAME block, and they cannot if each re-reads a moving nonce (Q33 — independent reads plus a
+   * blocking broadcast smeared the members across ~3 blocks, each covering a different, overlapping
+   * range). This member applies its own fixed offset to the shared base. `liveNonce` is undefined
+   * only when the read failed; the signer falls back to its startup floor then, so it never throws
+   * and never strands a guardian nonce behind a gap. Exactly one of `raw` / `sign` is set.
    */
-  sign?: () => Promise<`0x${string}`>;
+  sign?: (liveVictimNonce: number | undefined) => Promise<`0x${string}`>;
 }
 
 export interface SprayParams {
@@ -76,6 +82,13 @@ export interface SprayParams {
    * 3 blocks, so this defaults to 3 blocks at the measured 0.301s.
    */
   inflightWindowMs?: number;
+  /**
+   * Reads the LIVE victim nonce. Called ONCE per cluster (not per attempt), and the result is
+   * handed to every member's `sign` so they tile a contiguous authorization span for one block.
+   * Undefined when there is no anti-revoke window (static `raw` attempts), in which case `sign` is
+   * not used at all. Must not throw — a failed read returns undefined and the signer falls back.
+   */
+  readVictimNonce?: () => Promise<number | undefined>;
   /** Called with each broadcast result so the caller can log a timeline. */
   onAttempt?: (nonce: number, hash: `0x${string}` | undefined, ms: number) => void;
   /** Returns true once the rescue has demonstrably succeeded, ending the spray. */
@@ -122,31 +135,50 @@ export async function spray(p: SprayParams): Promise<SprayResult> {
     const now = Date.now();
     while (sentAt.length > 0 && now - sentAt[0]! > inflightWindowMs) sentAt.shift();
 
-    if (sentAt.length >= p.maxInFlight) {
+    // The cluster is the in-flight UNIT: its members must share one flip block, so admit it only
+    // when the whole cluster fits under the cap. The `sentAt.length > 0` guard keeps this from
+    // deadlocking if a cluster is larger than the cap (e.g. escalation fees shrink the inflight
+    // budget below clusterSize) — with nothing in flight we always admit at least one cluster and
+    // let the chain queue any excess, rather than sleeping forever. With clusterSize 1 this is the
+    // original per-attempt gate.
+    if (sentAt.length > 0 && sentAt.length + clusterSize > p.maxInFlight) {
       // Wait rather than pile on: exceeding the per-account inflight gas budget would have our
       // own transactions rejected during the window we care most about. `i` does not advance —
-      // this attempt is delayed, not dropped.
+      // this cluster is delayed, not dropped.
       await sleep(p.intervalMs);
       continue;
     }
 
-    const attempt = p.attempts[i]!;
-    const t0 = Date.now();
-    // Resolve the bytes at the last moment: a windowed attempt signs here, JIT, so its
-    // authorization slice is chosen against the live victim nonce rather than a stale anchor.
-    const raw = attempt.raw ?? (await attempt.sign!());
-    const result = await broadcastEverywhere(p.chainId, raw, p.urls);
-    const ms = Date.now() - t0;
-    sent++;
-    i++;
-    sentAt.push(t0);
-    timeline.push({ nonce: attempt.nonce, ms, hash: result.hash });
-    p.onAttempt?.(attempt.nonce, result.hash, ms);
+    const batch = p.attempts.slice(i, i + clusterSize);
+    // ONE live victim-nonce read for the whole cluster. Every member signs against this same base
+    // plus its own offset, so they tile a contiguous span for the SAME block instead of each
+    // re-reading a moving nonce — the Q33 fix. The read must not throw; on failure the signer falls
+    // back to its startup floor.
+    const liveNonce = p.readVictimNonce ? await p.readVictimNonce() : undefined;
 
-    // Pace by cluster, not by transaction: a cluster's members are meant to share one flip block,
-    // so we fire them back-to-back and only sleep once the cluster boundary is crossed. With
-    // clusterSize === 1 this is the original per-attempt cadence.
-    if (i % clusterSize === 0) await sleep(p.intervalMs);
+    const t0 = Date.now();
+    // Fire every member CONCURRENTLY. broadcastEverywhere returns on the first endpoint to accept
+    // (~local round-trip, ~10ms) rather than blocking on the slow remotes, so the members reach the
+    // mempool within a millisecond of each other and land in one flip block — the whole point of a
+    // cluster. Serial awaits here (the old code) spaced them ~one block apart and lost the race.
+    const fired = await Promise.all(
+      batch.map(async (attempt) => {
+        const raw = attempt.raw ?? (await attempt.sign!(liveNonce));
+        const result = await broadcastEverywhere(p.chainId, raw, p.urls);
+        return { attempt, hash: result.hash };
+      }),
+    );
+    const ms = Date.now() - t0;
+    for (const { attempt, hash } of fired) {
+      sent++;
+      sentAt.push(t0);
+      timeline.push({ nonce: attempt.nonce, ms, hash });
+      p.onAttempt?.(attempt.nonce, hash, ms);
+    }
+    i += batch.length;
+
+    // One inter-block pace per cluster, not per member.
+    await sleep(p.intervalMs);
   }
 
   const succeeded = await p.isDone();

@@ -521,10 +521,17 @@ async function main() {
   // the current nonce and returns a forward spread that tolerates a few steps of drift; the fix is
   // simply to read that nonce at the last moment. So each windowed attempt signs just-in-time (a
   // millisecond spread across the window, nowhere near the flip instant) rather than up front.
+  // Read the live victim nonce. Never throws — a failed read returns undefined and callers fall
+  // back to the startup floor. spray calls this ONCE per cluster (Q33) and hands the result to
+  // every member's sign; the backstop and the single-attempt path read it directly for their one
+  // fire.
+  const readVictimNonce = async (): Promise<number | undefined> => {
+    if (!window) return undefined;
+    try { return await client.getTransactionCount({ address: victim }); } catch { return undefined; }
+  };
   const selectLiveAuths = async (offset = 0): Promise<SignedAuthorization[] | undefined> => {
     if (!window) return undefined;
-    let n = victimNonce; // startup nonce as a floor if the live read hiccups — never throw here
-    try { n = await client.getTransactionCount({ address: victim }); } catch { /* keep the floor */ }
+    const n = (await readVictimNonce()) ?? victimNonce; // startup floor if the live read hiccups
     // `offset` positions this attempt within its cluster: member j reads [n+offset .. n+offset+3], so
     // the K members of a slot together span [n .. n + 4K-1] and one matches wherever the racing nonce
     // has landed by execution — past the single-attempt 4-nonce ceiling (Q32).
@@ -627,16 +634,20 @@ async function main() {
       chain,
     };
     if (window) {
-      // JIT: pick the authorization slice against the LIVE victim nonce at broadcast (Q29 fix),
-      // offset by this member's position in the cluster so the K members span 4K nonces (Q32).
-      // The guardian nonce stays fixed and sequential; only the auth slice is chosen late.
+      // JIT: pick the authorization slice against the LIVE victim nonce (Q29 fix), offset by this
+      // member's position in the cluster so the K members tile [liveNonce .. liveNonce + 4K-1]
+      // (Q32). The live nonce is read ONCE per cluster by spray and passed in — NOT re-read here per
+      // member, which smeared the members across blocks (Q33). The guardian nonce stays fixed and
+      // sequential; only the auth slice is chosen late.
+      const win = window; // capture the narrowed, defined window for the async closure
       const authOffset = AUTHS_PER_ATTEMPT * clusterPos;
       attempts.push({
         nonce: guardianNonce,
-        sign: async (): Promise<`0x${string}`> => {
-          const auths = await selectLiveAuths(authOffset);
-          // DEBUG_AUTH surfaces the live selection so a re-test can confirm the auth nonce climbs
-          // WITH the attacker's nonce racing, rather than lagging behind it as in Q29.
+        sign: async (liveNonce: number | undefined): Promise<`0x${string}`> => {
+          const base = liveNonce ?? victimNonce; // startup floor if the shared read failed
+          const auths = selectAuthorizations(win, base + authOffset, AUTHS_PER_ATTEMPT);
+          // DEBUG_AUTH surfaces the live selection so a re-test can confirm the members tile a
+          // CONTIGUOUS span (offsets 0,4,8,12 off one shared base) rather than overlapping reads.
           if (process.env.DEBUG_AUTH && auths?.length) {
             const tag = CLUSTER > 1 ? `[cluster ${clusterPos}] ` : '';
             console.log(`    ${tag}re-assert @ victim nonce ${auths[0]!.nonce}..${auths[auths.length - 1]!.nonce}`);
@@ -842,7 +853,7 @@ async function main() {
         console.log(`firing a single attempt (SPRAY_MODE=off — reacting, not pre-queueing)`);
         const single = attempts[0]!;
         const t0 = Date.now();
-        const singleRaw = single.raw ?? (await single.sign!());
+        const singleRaw = single.raw ?? (await single.sign!(await readVictimNonce()));
         const r = await broadcastEverywhere(CHAIN_ID, singleRaw, urls);
         console.log(`  nonce=${single.nonce} ${r.hash ?? 'REJECTED'} (${Date.now() - t0}ms)`);
         if (r.hash) {
@@ -862,6 +873,10 @@ async function main() {
         // Pace by SLOT, not by transaction: the cluster's members share a block, so the
         // inter-attempt sleep applies once per CLUSTER broadcasts, not once per transaction.
         clusterSize: CLUSTER,
+        // ONE live nonce read per cluster, shared by all its members so they tile a contiguous
+        // authorization span for the same block (Q33). Undefined-safe: returns undefined if the
+        // read fails and each member falls back to its startup floor.
+        readVictimNonce,
         onAttempt: (nonce, hash, ms) =>
           console.log(`  nonce=${nonce} ${hash ?? 'REJECTED'} (${ms}ms)`),
         isDone,

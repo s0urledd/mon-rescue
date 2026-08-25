@@ -50,8 +50,15 @@ export async function broadcastEverywhere(
   } catch {
     hash = undefined;
   }
-  // Let stragglers settle so `attempts` is complete for the post-mortem, but never block on them.
-  await Promise.allSettled(sends);
+  // Do NOT block on the slow endpoints. Promise.any already returned the first acceptance — the
+  // local node at ~10ms. The previous `await Promise.allSettled(sends)` here also waited on the
+  // remote RPCs (~230ms measured), and that latency is per-broadcast: it serialized a cluster's
+  // members across ~3 blocks and defeated the entire point of firing them into ONE flip block
+  // (Q33). Let the stragglers settle detached — they still push into `attempts` for the
+  // post-mortem; the array simply is not guaranteed complete at the moment of return, which the hot
+  // path does not need. allSettled never rejects and attaches a handler to every send, so nothing
+  // goes unhandled.
+  void Promise.allSettled(sends);
 
   return { hash, attempts };
 }
