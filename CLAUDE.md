@@ -186,6 +186,19 @@ not running.
 
 ## Open items
 
+- **FUAA — the protocol may absorb our problem domain (strategic; see `research/STRATEGY-FUAA.md`).**
+  Monad's "Flexible and Upgradeable Account Authentication" MIP (draft, 2026-08-22, Babel & Camenisch)
+  makes key rotation/recovery/PQ a native primitive: mutable `AuthConfig`, address decoupled from keys,
+  guardians as a `reconfiguration_policy` clause, reconfig activates in **k=3 blocks**. Read for us: NOT
+  a death but a **boundary shift** — the attack moves from *drain* to *reconfigure-to-lock* (retire the
+  owner's key; then owner sigs, incl. our 7702 window, are refused), and the defensive clock shrinks
+  from the 8–13h unbonding delay to **~0.9s**. We lose the proactive-configured segment and part of the
+  `WITHDRAWAL_DELAY` moat; we keep the reactive core (attacker holds the seed, FUAA doesn't recover the
+  unconfigured victim), the race engine, and every measured fact — and gain two adjacent products
+  (reconfiguration-race rescue; guardian-as-a-service). Draft only; **current product unaffected until
+  accounts are configured**. The strategy note holds the full analysis, the opportunity list, and the
+  open technical questions (pending-slot replacement semantics, AuthConfigManager fee ordering, retired-
+  key `ecRecover` gap) that decide whether the reactive heir is a product. Revisit when the impl spec lands.
 - **Slot-splitting griefing.** Each withdrawal slot needs its own `withdraw()` call, and the
   attacker chooses how many `undelegate` calls to make. 50 slots multiplies our per-attempt cost
   13x; at the 256 maximum one attempt costs ~35 MON and collides with the inflight budget,
