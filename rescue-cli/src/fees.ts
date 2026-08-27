@@ -221,9 +221,17 @@ export function feeSchedule(
   // window in the 10-20 MON range across observed mainnet traffic while still bidding hundreds
   // of times the median. Beating a genuine top bidder is what the escalation rungs are for —
   // they exist precisely for the case where the window did not settle it.
-  const wanted = observed.p90Priority > 0n
-    ? observed.p90Priority * windowOvertop
-    : observed.baseFeePerGas / 2n;
+  // WINDOW_FEE_GWEI pins the window tip to an exact value, bypassing the live p90 sample. This is
+  // for controlled fee experiments (e.g. a parity test where arm and the attacker must bid the SAME
+  // tip): p90 x overtop is deterministic only if the sampled p90 holds still, which on a noisy chain
+  // it does not (Q32 saw a p99 artifact swing it 20x). Not for production — there the live p90 is the
+  // point. The ceiling (from MAX_SPEND_PER_ATTEMPT) still caps it.
+  const fixedTipGwei = process.env.WINDOW_FEE_GWEI;
+  const wanted = fixedTipGwei
+    ? BigInt(fixedTipGwei) * 1_000_000_000n
+    : observed.p90Priority > 0n
+      ? observed.p90Priority * windowOvertop
+      : observed.baseFeePerGas / 2n;
   const windowFee = wanted > ceiling ? ceiling : wanted;
 
   const flat = Math.max(1, Math.min(windowAttempts, attempts));
