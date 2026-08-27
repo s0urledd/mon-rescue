@@ -303,23 +303,23 @@ not running.
   defense) beats us until the **multi-tx cluster** lands — send K auth-diverse attempts per flip block
   (`[N+4j..N+4j+3]`), covering 4K nonces; all outbid, so whichever slice matches the live nonce wins.
   K=4 → 16-nonce tolerance, covers ~10/block. Cost K× spray gas (acceptable).
-- **Multi-tx cluster: first run LOST to a firing bug, now fixed, UNVERIFIED (Q34).** `CLUSTER_SIZE`
-  (default 1 = unchanged) fires K auth-diverse tx into one flip block: member j re-asserts at
-  `liveNonce+4j`, K members span `[N..N+4K-1]`; sequential guardian nonces, same fee step (all order
-  ahead). The epoch-1134 run at `CLUSTER_SIZE=4` vs `MAX_RACE=10` **lost** (safe +0, sink +104.98) — but
-  DEBUG_AUTH proved the cluster never shared a block: (1) `broadcastEverywhere` blocked on
-  `await Promise.allSettled` AFTER `Promise.any` already had the fast local hash, so every broadcast ate
-  ~230ms (> one 301ms block) and smeared the 4 members across ~2.3 blocks; (2) each member re-read the
-  nonce independently, so they read different bases and produced overlapping, non-contiguous ranges. Both
-  fixed (0796bc6): broadcast returns on first acceptance (stragglers detached, ~230ms→~10ms); `spray()`
-  reads the live nonce ONCE per cluster and fires the members via `Promise.all` so they tile a contiguous
-  `[L..L+15]` and land together. Non-matching members hit the drainer's unmatched selector (no fallback)
-  and revert harmlessly. **Retest unchanged** (`CLUSTER_SIZE=4 DEBUG_AUTH=1` vs `MAX_RACE=10`, window
-  ~1200) but the pass bar is now stronger: the four `[cluster j]` lines must show a **contiguous**
-  `L,L+4,L+8,L+12` tiling (not overlapping reads) AND one must cover the live nonce at the flip, AND safe
-  takes the position. Until it lands on-chain the burster gap is NOT proven closed. The honest ceiling
-  still stands: even fixed, a burst faster than `4K/(read-to-exec blocks)` wins, and the attacker can
-  afford it.
+- **Multi-tx cluster WINS the bursting attacker — verified (Q35). Limit B closed for ~10/block.**
+  `CLUSTER_SIZE` (default 1 = unchanged) fires K auth-diverse tx into one flip block: member j re-asserts
+  at `liveNonce+4j`, K members tile `[N..N+4K-1]`; sequential guardian nonces, same fee step (all order
+  ahead). Q34's first run LOST (epoch 1134, safe +0) to a firing bug — DEBUG_AUTH showed the members
+  never shared a block: (1) `broadcastEverywhere` blocked on `await Promise.allSettled` AFTER
+  `Promise.any` already had the local hash, so every broadcast ate ~230ms and smeared the 4 members
+  across ~2.3 blocks; (2) each member re-read the nonce independently → overlapping ranges. Fixed
+  (0796bc6): broadcast returns on first acceptance (stragglers detached, 230ms→~64ms measured); `spray()`
+  reads the live nonce ONCE per cluster and fires members via `Promise.all` so they tile a contiguous
+  `[L..L+15]` and land together. **Retest WON (Q35, epoch 1143): safe +100.385688 MON (independent
+  `eth_getBalance`: 219.76→320.15), attacker +0, `succeeded=true`.** DEBUG_AUTH proved the fix: contiguous
+  `2948/2952/2956/2960` tiling (vs Q34's overlapping `2764/2772/2780/2768`), base climbing with the burst,
+  ~64ms broadcasts. **Honest limits:** fee held 3× in our favor (isolates limit B — the win is the nonce
+  race, NOT fee parity/attacker-outbid, which is Q7's auction, untested); burst was 10/block (a faster
+  burster still exceeds the K=4 span → raise `CLUSTER_SIZE` or split guardians); naive re-delegation
+  (adaptive attacker unmeasured); single run (repeat 1–2× to rule out lucky flip placement). "We lose to
+  any burster" (Q32) → "we win up to a burst rate the cluster is sized for."
 - **Completion detection: size success against the POSITION, never loose + position (Q30).** The win
   above was first reported as a FAILURE (`succeeded=false`, "funds left without us", exit 1) because
   `doneThreshold` was `loose + 90%·position` and a position-only win (attacker took the loose)

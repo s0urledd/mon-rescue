@@ -549,6 +549,60 @@ Two further constraints that bite the hot path specifically:
 
 ---
 
+## Q35 — FIRST WIN against a bursting attacker: the parallel cluster takes the position, verified on-chain
+
+The Q34 fix (parallel cluster + single nonce read + non-blocking broadcast) was retested against the
+exact configuration that beat us in Q32/Q34 — mirror-atomic `MAX_RACE=10`, `CLUSTER_SIZE=4`, window
+`2798..3997` covering the burst, arm 3× outbidding (225 vs 75 gwei). **arm won the position**, and the
+safe balance was confirmed independently on-chain.
+
+### Result — verified (epoch 1143, flip window 57,104,940..57,105,000)
+
+| measurement | value |
+|---|---|
+| safe (us) | baseline 219.761847 → **320.147535 MON** (independent `eth_getBalance`) = **+100.385688** |
+| arm's own report | `safe address received 100.38568849473269251 MON` — matches the on-chain delta exactly |
+| attacker (sink) | 218.162741 → **218.162741 = +0** (every drain reverted; the position was already ours) |
+| spray | `80 attempt(s), succeeded=true` → `rescue landed` |
+| victim final delegation | the drainer (irrelevant — the position was swept at the flip, before any drain could claim) |
+
+### Why it won — the fix did exactly what it was designed to
+
+The DEBUG_AUTH timeline shows the two defects from Q34 are gone:
+
+- **Contiguous tiling.** A cluster's four members now tile one base cleanly: `[cluster 0] 2948..2951,
+  [cluster 1] 2952..2955, [cluster 2] 2956..2959, [cluster 3] 2960..2963` — `L, L+4, L+8, L+12`, no
+  gaps, no overlap. Q34's losing run had `2764, 2772, 2780, 2768` (independent reads, overlapping).
+- **The base tracked the burst.** Successive clusters read `2948 → 2956 → 2965 → 2975 → 2987`, climbing
+  with the attacker's marching nonce, so some member always covered the live nonce at the flip.
+- **Broadcast latency ~64ms**, down from ~230ms. Four members fire concurrently in ~64ms, well inside a
+  301ms block, so they land together instead of smeared across ~3 blocks.
+
+So a 16-nonce contiguous span, refreshed every block against the live nonce and delivered into one
+block, absorbed a ~10/block burst: the read-to-execution gap (~1 block, ~10 nonces) stayed inside the
+span. Non-matching members ran `rescue()` against the drainer's unmatched selector and reverted
+harmlessly (`AdversaryDrainer` has no fallback), so the four-per-block cluster costs only gas on the
+misses. **Limit B is closed for a ~10/block burster.**
+
+### Honest limits — what this does and does NOT prove
+
+- **Fee was held 3× in arm's favor.** This isolates limit B (the nonce race) with the fee auction
+  removed as a variable — exactly the point, since Q32 lost *with* that same 3× advantage. It does NOT
+  prove a win at fee **parity** or when the attacker **outbids**; that is the separate auction question
+  (Q7 says ordering is a priority-gas auction, so at parity the flip block is closer to a coin flip).
+- **Burst rate was 10/block.** The ceiling is now `4K / (read-to-execution blocks)` ≈ 16 nonces per ~1
+  block. A deliberately faster burster (`MAX_RACE` 16–20+) can still exceed the K=4 span; the answer
+  there is a larger `CLUSTER_SIZE` (more gas) or splitting the guardian across keys. "We lose to any
+  burster" (Q32) is now "we win up to a burst rate the cluster is sized for."
+- **Naive re-delegation.** The attacker re-delegated but did not adapt its bid or burst to our observed
+  behaviour. An adaptive attacker is unmeasured.
+- Single run. Worth 1–2 repeats to rule out a lucky flip-block placement before calling it settled.
+
+Artifact: `research/artifacts/battle-mirror-atomic.json`. Winning attempts are nonces 809–828 in the
+arm timeline.
+
+---
+
 ## Q34 — First cluster run LOST, and told us why: the members never shared a block (serial broadcast). Fixed, retest pending
 
 The clean re-test of Q33 ran (epoch 1134, flip block 56,655,000-ish, mirror-atomic `MAX_RACE=10`,
