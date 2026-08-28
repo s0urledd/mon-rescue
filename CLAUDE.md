@@ -88,6 +88,7 @@ input is signatures made in their own wallet.
 | Sender's gas allowance | `gas_price × gas_limit` (docs, verbatim) |
 | Failed precompile call | *"calls with invalid arguments consume all gas"* — a cap above the tx limit caps nothing |
 | Cold account access | **10,100 gas** (Ethereum: 2,600). Cold storage 8,100 (2,100). Warm unchanged |
+| Storage warming (MIP-8) | **page-granular, not slot** — first access to a 128-slot page costs cold (SLOAD 8,100 = LOAD 8,000 + BASE 100); every later slot in the SAME page is warm (100). Discount only; dispersed/hashed access keeps baseline. Live testnet 2026-08-12, **mainnet 2026-09-02 14:30 UTC (MonadTen)** |
 | Memory expansion | linear `w/2`, not Ethereum's quadratic |
 | Inflight gas budget | `min(user_reserve_balance, lagged balance)` over `k` blocks — docs confirm |
 | 7702-delegating **to the staking precompile** | *"all calls to it will revert"* — never do this |
@@ -199,6 +200,20 @@ not running.
   accounts are configured**. The strategy note holds the full analysis, the opportunity list, and the
   open technical questions (pending-slot replacement semantics, AuthConfigManager fee ordering, retired-
   key `ecRecover` gap) that decide whether the reactive heir is a product. Revisit when the impl spec lands.
+- **MIP-8 page-storage gas lands on MAINNET 2026-09-02 14:30 UTC (MonadTen) — direction is SAFE for us.**
+  MIP-8 makes storage warming page-granular (128 slots/page): constants `BASE 100, LOAD 8000, WRITE 2800,
+  STATE_GROWTH 17000`, so cold SLOAD 8,100 / warm 100 (matches our existing facts) but every later slot in
+  the same page is now warm. It is a **discount** (contiguous/same-page access cheaper; dispersed access
+  keeps baseline; no increase) — so it can only leave `estimateRescueGas()` further on the LONG (safe) side,
+  never short. Testnet has been on MIP-8 since 2026-08-12, and **Q35 rescued successfully on post-MIP-8
+  testnet with current sizing**, so the path is empirically fine. Residual: (1) confirm the staking
+  precompile's own gas (`withdraw` 68,675) didn't shift if its internal storage was repriced — re-measure on
+  mainnet after 2026-09-02; (2) if we run our OWN mainnet node for latency, it needs Phase-A + v0.16.1 before
+  the fork or it diverges — RPC-only means the provider handles it (confirm which we use). **Opportunity:**
+  MIP-8's EIP-2930 access list charges a page's cold cost once and warms the rest — attaching an access list
+  for the staking slots the rescue touches (if page-local) shaves gas on the hot path. Minor (the precompile
+  dominates), but a real lever; measure with the Foundry MonadNine↔MonadTen gas diff. MIP-10 (Deterministic
+  RaptorCast, Draft) is consensus/dissemination only — neutral for our race, mildly positive latency, no action.
 - **Slot-splitting griefing.** Each withdrawal slot needs its own `withdraw()` call, and the
   attacker chooses how many `undelegate` calls to make. 50 slots multiplies our per-attempt cost
   13x; at the 256 maximum one attempt costs ~35 MON and collides with the inflight budget,
