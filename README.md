@@ -1,55 +1,85 @@
 # MonRescue
 
-A delegator-protection layer for [Monad](https://monad.xyz): an alert engine for staking
-health, and a destination-locked rescue path for delegators whose keys have been compromised.
+Key-compromise recovery for Monad delegators.
 
-## Status
+MonRescue is an experimental, non-custodial system for recovering staked and unbonding MON from a compromised account. It combines a staking-event watcher, pre-signed EIP-7702 authorizations, a guardian-funded transaction sender, and a destination-locked rescue contract.
 
-**Phase 0 closed. The rescue works.**
+The system must be configured before the account is compromised. It cannot recover liquid MON that an attacker can transfer immediately.
 
-Transaction [`0x6c285d49…`](https://testnet.monadvision.com/tx/0x6c285d49425cd829bb74dc784818fcbd0279a8fcb4fa0736c98460d2b313e17b),
-block 51,416,783: three matured withdrawals claimed from the staking precompile and
-**500.112413 MON swept to the destination-locked safe address in a single block**, sent by a
-guardian key that never held the victim's key.
+> **Status:** Active research prototype. The core claim-and-sweep flow has been verified on Monad testnet. The contracts have not been audited and the system is not ready for production use.
 
-| question | answer |
-|---|---|
-| Q1 — atomic claim + sweep in one 7702 transaction | **YES**, measured |
-| Q2 — viem submits a working `0x04` to Monad | **YES**, measured |
-| Q3 — reserve floor | `min(start, 10 MON)`; the "contradiction" was illusory |
-| Q4 — a separate guardian can fire it | **YES**, same run |
-| Q5 — can a withdrawal name a recipient | **NO** — which is why the rescue must be atomic |
+## Threat model
 
-Not yet done: the **battle test**. Every rescue so far was uncontested. Winning at an equal fee
-is the result that means something.
+MonRescue assumes that:
+
+- an attacker has obtained the delegator's private key;
+- the owner previously selected a separate safe address;
+- the rescue contract and EIP-7702 authorizations were prepared before the compromise; and
+- an independent guardian can pay for and submit rescue transactions.
+
+The attacker can transfer liquid MON, change the account's delegation, advance its nonce, and compete on transaction fees. MonRescue does not remove those capabilities. It provides a pre-authorized path that attempts to claim matured staking withdrawals and move them to the safe address before the attacker can do so.
+
+Recovery is therefore competitive, not guaranteed. The outcome depends on authorization coverage, transaction ordering, fee policy, broadcast latency, and the attacker's behavior.
 
 ## How it works
 
-The attacker holds the seed and usually unstakes the position themselves. They cannot take it
-immediately — `undelegate` puts funds behind `WITHDRAWAL_DELAY` for everyone, including them.
-That delay is the entire product, and their own `Undelegate` event hands us the validator, the
-slot, the amount and the exact maturity epoch.
+1. A separate rescue contract is deployed for the delegator. The safe address is stored as an immutable constructor value.
+2. The delegator signs EIP-7702 authorizations for that contract. Signing does not require sharing a seed phrase or private key.
+3. The watcher monitors staking activity. An `Undelegate` event identifies the validator, withdrawal slot, amount, and maturity epoch.
+4. At maturity, a guardian-funded transaction applies a valid authorization and calls `rescue()` on the delegated account.
+5. `rescue()` calls the staking precompile and sweeps the resulting MON to the immutable safe address in the same transaction.
 
-At the unlock we fire one transaction that claims and sweeps atomically, to an address burned
-into the contract at construction. No function anywhere takes a recipient, so even the attacker
-calling it moves funds to the user's own safe address.
+`rescue()` is intentionally permissionless. The safety boundary is the destination, not the caller: the contract exposes no function that accepts an arbitrary recipient. A caller can trigger the rescue, but cannot redirect the funds.
 
-We never see a seed phrase or a private key.
+## Verified testnet results
 
-## Operating notes
+| Test | Result | Evidence |
+|---|---|---|
+| Atomic withdrawal and sweep | Three matured withdrawals were claimed and 500.112413 MON was sent to the safe address in one transaction. The transaction was submitted by a guardian that did not hold the victim key. | [Transaction `0x6c285d49...`](https://testnet.monadvision.com/tx/0x6c285d49425cd829bb74dc784818fcbd0279a8fcb4fa0736c98460d2b313e17b), block 51,416,783 |
+| Competing EIP-7702 re-delegations | In one controlled run against an adversary advancing the victim nonce at approximately 10 re-delegations per block, the safe balance increased by 100.385688 MON and the attacker sink balance did not change. | [`research/FINDINGS.md`, Q35](research/FINDINGS.md#q35--first-win-against-a-bursting-attacker-the-parallel-cluster-takes-the-position-verified-on-chain) |
 
-- **Run beside a Monad node.** Detection is ~8ms local against ~116ms remote, and both reads and
-  broadcast go local first. Auto-detected at `127.0.0.1:8080`.
-- **Fees are a MON budget per attempt**, not a multiplier — `eth_maxPriorityFeePerGas` returns a
-  hardcoded 2 gwei on Monad, so multiplying it measured nothing. Attempts climb a cubic curve
-  from 2x the p90 bid toward the budget.
-- **Gas is charged on the limit, not usage, with no refunds**, and the staking precompile
-  consumes all gas on failure. `estimateRescueGas()` sizes from position count; being short
-  loses the whole attempt.
-- **One guardian key per concurrently-armed customer** — Monad's inflight gas cap is per account
-  and belongs to the guardian.
-- `nohup` is not supervision. Use `systemd` with `Restart=always` and a heartbeat visible from
-  outside the process.
+The second result was obtained with a four-transaction authorization cluster and a 3x fee advantage. It is a single controlled test, not evidence of a guaranteed win against every sweeper.
 
-`CLAUDE.md` carries the working context. `research/FINDINGS.md` has every claim with its
-evidence. `STEPS.md` is the runbook.
+## Current limitations
+
+- Setup after compromise is outside the supported model.
+- Liquid MON can be transferred immediately by the key holder and is not recoverable through this mechanism.
+- A determined attacker can invalidate signed authorizations by advancing the account nonce.
+- The current authorization cluster was tested against a burst rate of approximately 10 nonce changes per block. Faster or adaptive strategies remain open research.
+- Fee parity and attacker outbidding are not yet settled.
+- Results are from testnet unless a finding explicitly says otherwise.
+- The contracts and operational tooling have not received an external security audit.
+
+See [`research/FINDINGS.md`](research/FINDINGS.md) for the complete experiment log, including failed runs, corrected assumptions, transaction evidence, and unresolved questions.
+
+## Repository layout
+
+| Path | Purpose |
+|---|---|
+| [`contracts/`](contracts/) | Destination-locked rescue contract and adversary test contract |
+| [`watcher/`](watcher/) | Staking-event monitoring and alerting |
+| [`rescue-cli/`](rescue-cli/) | Authorization, simulation, fee planning, and broadcast logic |
+| [`packages/shared/`](packages/shared/) | Chain configuration, epoch calculations, transport, and shared staking logic |
+| [`research/`](research/) | Testnet experiments and recorded findings |
+| [`STEPS.md`](STEPS.md) | Reproduction procedure from a fresh clone |
+| [`RUNBOOK.md`](RUNBOOK.md) | Operational runbook |
+| [`approval/AUTHORIZATION.md`](approval/AUTHORIZATION.md) | Authorization model and nonce-revocation analysis |
+
+## Local setup
+
+The workspace uses pnpm.
+
+```bash
+pnpm install
+pnpm --filter @monrescue/shared build
+pnpm typecheck
+pnpm run build:contracts
+```
+
+For testnet configuration and the full experiment sequence, follow [`STEPS.md`](STEPS.md). Start from [`.env.example`](.env.example) and use throwaway testnet keys only.
+
+Do not put a production seed phrase or private key into this repository. The intended user flow requires signatures, never custody of the delegator's key.
+
+## License
+
+[MIT](LICENSE)
