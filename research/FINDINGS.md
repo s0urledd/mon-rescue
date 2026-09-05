@@ -549,6 +549,111 @@ Two further constraints that bite the hot path specifically:
 
 ---
 
+## Q36 — MAINNET measurement of the pre-queue and multi-tx primitives: two structural limits the testnet runs never exposed
+
+The pre-queue, the multi-transaction cluster, and the "are we done?" guard were exercised on **mainnet**
+against a contract with a hard, publicly-known activation timestamp and a capped first-come resource —
+the same shape as a flip-block race, with real fees and a real crowd. Not a rescue; a measurement of the
+primitives outside the harness that has always hosted them. Three of the four results contradict what
+the testnet runs implied.
+
+### 1. Pre-queue works on mainnet — confirmed at production fees
+
+A transaction broadcast ~1s ahead of the activation timestamp was included **in the activation block
+itself** (offset `+0`) and succeeded. By offset `+1` the contested resource was already ~15% consumed;
+by `+40` (12s) it was 61% gone. Reacting to the activation, rather than pre-queuing across it, reaches
+`+1` at the earliest. **The pre-queue buys the block it claims to buy, on mainnet.** Consistent with Q12
+and with the pre-queue default; now observed outside a controlled epoch flip.
+
+### 2. Sequential nonces from ONE account cannot occupy the same block
+
+Two variants of the same call — differing in one argument whose correct value was genuinely unknown —
+were fired as consecutive nonces `N` and `N+1`, broadcast concurrently, identical fee, on the theory
+that both would land in the decisive block and whichever was correct would win.
+
+They did not land together:
+
+| nonce | variant | block (relative to activation) | outcome |
+|---|---|---|---|
+| 23 | A | **−3** | reverted (not yet active) |
+| 24 | B | **+0** | **succeeded** |
+
+Nonce ordering is a protocol constraint, not a scheduling preference: `N` must precede `N+1`, so any
+block with room for `N` consumes it there and `N+1` inherits a later one. Variant A was spent on a block
+where the target was not yet active — it could never have won. The hedge survived only because the
+correct variant happened to be second. **Reversed, it loses outright**, and nothing in the design would
+have said so.
+
+**This qualifies Q35.** The cluster's members shared a block there because they were fired *inside* a hot
+window with a saturated pool, and were picked up as one batch. Fired *ahead* of the decisive block —
+which is exactly what pre-queuing does — the identical construction serializes across blocks. **Two
+transactions that must land in one block need two ACCOUNTS, not two nonces.** The per-customer guardian
+key reaches the same conclusion from the inflight-budget direction; this is the same wall, measured from
+the other side.
+
+### 3. The inflight gas cap throttles broadcast rate — first mainnet measurement
+
+Ten transactions were broadcast from one account across ~12s, paced by the sender at ~900ms, each
+reserving a gas allowance of ~50 MON (`gas_limit × (base + tip)`). Inclusion offsets:
+
+```
+−3, +0, +3, +8, +11, +14, +17, +20, +33, +37
+gaps:  3,  3,  5,   3,   3,   3,   3,  13,   4
+```
+
+**~3 blocks between consecutive transactions regardless of broadcast rate** — including pairs fired
+concurrently in the same round. This is the inflight gas budget (`min(user_reserve_balance, lagged
+balance)` over `k` blocks) behaving as documented, measured on mainnet for the first time.
+
+It converts a theoretical note into a constraint with a number. The slot-splitting item predicted that a
+~35 MON per-attempt cost "collides with the inflight budget, collapsing the spray to a single shot." It
+does, and the relationship is direct: **the per-attempt gas budget sets the maximum spray rate from one
+account.** A 50 MON attempt yields roughly one transaction per 3 blocks. A window sized on the assumption
+of one attempt per block is silently getting a third of its coverage — the same shortfall as the "one
+broadcast every 3 blocks" mistake already recorded, reached from the opposite direction, with no line of
+code being wrong.
+
+**Fee and coverage are therefore not independent knobs.** Raising the per-attempt bid lowers
+attempts-per-block from a single account. Where both matter, the answer is more accounts, not a bigger
+bid — which is a second, independent argument for the per-customer guardian key.
+
+**UNVERIFIED:** `k` and the exact budget formula were not isolated here; the ~3-block spacing is the
+observable, not the mechanism's constants. Before sizing a spray against it, measure directly — vary the
+per-tx gas budget, record inclusion spacing.
+
+### 4. Sixth instance of the silent-failure class — a completion guard that failed OPEN
+
+The loop's "are we done?" check was a single contract read with a swallowed error:
+
+```js
+const done = () => read(...).catch(() => 0n);   // error -> 0n -> "not done" -> keep spending
+```
+
+The operation succeeded at offset `+0`. The guard never saw it, and the loop fired nine more
+transactions (~450 MON) until an unrelated condition stopped it. Either the read threw and was caught,
+or it hit a lagging endpoint — the log cannot distinguish the two, which is itself the finding.
+
+The defect is the failure *direction*: an error returns the value meaning "keep going". All five failures
+already recorded have this shape; this is the sixth, and the first measured on mainnet with a real cost
+attached. **The authoritative signal was available and unused** — our own broadcast hashes. A receipt
+with `status 0x1` is proof, does not depend on one endpoint, and has no fail-open direction. A guard
+whose error path spends money must read *what we did*, not the world's opinion of it.
+
+Also worth recording: the loop was stopped by an unrelated condition (the contested resource running
+out), not by its own spend ceiling. **The cost control that worked was the one not designed to be the
+cost control** — the designed ceiling was never reached, so it was never tested.
+
+### What transfers
+
+- **Pre-queue:** confirmed on mainnet; keep as default.
+- **Cluster:** keep, but its members only share a block when fired *inside* the window. Ahead of the
+  decisive block they serialize, and covering that case needs separate accounts.
+- **Sizing:** per-attempt bid and attempts-per-block are coupled through the inflight budget. Size them
+  together, never one at a time.
+- **Completion detection:** check our own receipts. Never a single fail-open read of the world.
+
+---
+
 ## Q35 — FIRST WIN against a bursting attacker: the parallel cluster takes the position, verified on-chain
 
 The Q34 fix (parallel cluster + single nonce read + non-blocking broadcast) was retested against the

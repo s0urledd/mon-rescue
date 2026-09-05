@@ -90,7 +90,8 @@ input is signatures made in their own wallet.
 | Cold account access | **10,100 gas** (Ethereum: 2,600). Cold storage 8,100 (2,100). Warm unchanged |
 | Storage warming (MIP-8) | **page-granular, not slot** — first access to a 128-slot page costs cold (SLOAD 8,100 = LOAD 8,000 + BASE 100); every later slot in the SAME page is warm (100). Discount only; dispersed/hashed access keeps baseline. Live testnet 2026-08-12, **mainnet 2026-09-02 14:30 UTC (MonadTen)** |
 | Memory expansion | linear `w/2`, not Ethereum's quadratic |
-| Inflight gas budget | `min(user_reserve_balance, lagged balance)` over `k` blocks — docs confirm |
+| Inflight gas budget | `min(user_reserve_balance, lagged balance)` over `k` blocks — docs confirm. **Measured on mainnet:** at a ~50 MON per-tx gas allowance, one account is throttled to **~1 tx per 3 blocks** regardless of broadcast rate (Q36) |
+| Sequential nonces | **cannot occupy the same block** — `N` must precede `N+1`, so a block with room for `N` takes it and `N+1` inherits a later one. Two txs that must land together need two **accounts** (Q36) |
 | 7702-delegating **to the staking precompile** | *"all calls to it will revert"* — never do this |
 | Authorization list length | capped at **4 or 5** (6 rejected, 4 accepted). Undocumented, RPC-enforced |
 | `claimRewards()` gas | 155,375 — **70% of per-position cost**, usually not worth it |
@@ -164,7 +165,7 @@ default trades a small certain cost against a small chance of total loss, take t
 
 ## The other recurring failure class
 
-Five separate failures, all **silent**, none logic errors in the ordinary sense:
+Six separate failures, all **silent**, none logic errors in the ordinary sense:
 
 - a stale `dist/` that died on import and looked identical to "armed and waiting" for two days
 - a log lookback sized for prompt claims, missing a two-day-old position
@@ -173,6 +174,13 @@ Five separate failures, all **silent**, none logic errors in the ordinary sense:
 - `spray()` backing off with `continue` inside a `for…of`, which **skipped** the attempt instead
   of delaying it — and since attempts carry consecutive nonces, the first back-off stranded every
   later rung behind a permanent nonce gap
+- a completion guard written as `read(...).catch(() => 0n)`, where an RPC error returns the value
+  that means *"not done — keep spending"*. The operation had in fact succeeded; the guard could not
+  see it and the loop kept firing (Q36, mainnet, ~450 MON). **The defect is the failure direction:**
+  an error path that resolves toward spending money. The authoritative signal was available and
+  unused — our own broadcast hashes, whose receipts prove the outcome, depend on no single endpoint,
+  and have no fail-open direction. **A guard whose error path costs money must read what WE did, not
+  the world's opinion of it.**
 
 Every one would have lost funds in a real rescue and none announced itself. The last was the
 first caught before it cost anything, by reading the hot path asking *"what does this do when the
@@ -335,6 +343,23 @@ not running.
   burster still exceeds the K=4 span → raise `CLUSTER_SIZE` or split guardians); naive re-delegation
   (adaptive attacker unmeasured); single run (repeat 1–2× to rule out lucky flip placement). "We lose to
   any burster" (Q32) → "we win up to a burst rate the cluster is sized for."
+- **The cluster shares a block only when fired INSIDE the window — and the inflight budget caps the
+  spray rate (Q36, mainnet).** Two independent limits found by exercising the primitives on mainnet
+  against a hard activation deadline. (1) **Sequential nonces cannot co-occupy a block.** Two variants
+  fired concurrently as `N`/`N+1` landed 3 blocks apart — `N` was consumed by an earlier block where the
+  target was not yet active and could never have won; only the second variant reached the decisive block.
+  Q35's members shared a block because they were fired *inside* a hot window with a saturated pool; fired
+  *ahead* of the decisive block, the same construction serializes. **Landing two txs in one block needs
+  two ACCOUNTS, not two nonces** — the same wall the per-customer guardian key hits from the other side.
+  (2) **The inflight gas cap throttles broadcast rate:** at ~50 MON per tx, one account managed **~1 tx
+  per 3 blocks** no matter how fast we broadcast. So **fee and coverage are coupled** — raising the
+  per-attempt bid lowers attempts-per-block from a single account, and a window sized at one attempt per
+  block silently gets a third of its coverage (the "one broadcast every 3 blocks" mistake, reached from
+  the opposite direction, with no code being wrong). Size bid and coverage together; where both matter,
+  add accounts rather than MON. **UNVERIFIED:** `k` and the budget formula were not isolated — the
+  3-block spacing is the observable, not the constants. Measure directly (vary per-tx gas budget, record
+  inclusion spacing) before sizing a spray against it. Pre-queue itself was **confirmed on mainnet**: a
+  tx broadcast ~1s ahead landed in the activation block, which was already ~15% consumed one block later.
 - **Completion detection: size success against the POSITION, never loose + position (Q30).** The win
   above was first reported as a FAILURE (`succeeded=false`, "funds left without us", exit 1) because
   `doneThreshold` was `loose + 90%·position` and a position-only win (attacker took the loose)
